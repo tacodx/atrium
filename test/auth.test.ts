@@ -30,6 +30,16 @@ describe('handoff token', () => {
     expect(t).toMatch(/^[A-Za-z0-9_-]{43}$/)
     expect(t).not.toBe(auth.mintHandoff(1000))
   })
+
+  test('an expired token is consumed, not merely rejected', () => {
+    const t = auth.mintHandoff(1000)
+    // Expired: rejected, AND removed from the map.
+    expect(auth.consumeHandoff(t, 1000 + 60_001)).toBe(false)
+    // Now replay it at a moment when it WOULD still be within its TTL.
+    // Correct implementation: already deleted, so still false.
+    // Conditional-delete bug: still in the map and inside the TTL -> true.
+    expect(auth.consumeHandoff(t, 1000)).toBe(false)
+  })
 })
 
 describe('websocket first-frame auth', () => {
