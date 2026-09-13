@@ -22,9 +22,43 @@ const HARDENING = [
   '-c', 'core.askPass=',
   '-c', 'core.editor=false',
   '-c', 'core.pager=cat',
-  '-c', 'diff.external=',
   '-c', 'protocol.ext.allow=never',
+  // deliberately NOT '-c diff.external=' — see the comment on
+  // DIFF_PRODUCING_SUBCOMMANDS just below for why that looked right and was wrong.
 ]
+
+/**
+ * `diff.external` and `.gitattributes`-driven `diff.<driver>.textconv` are two
+ * SEPARATE repo-controlled execution vectors on any diff-producing command.
+ * Neither can be closed from HARDENING's global `-c` prefix:
+ *
+ * - `-c diff.external=` (this file's first shipped attempt) does not disable
+ *   external diff — it makes git treat external diff as CONFIGURED to the
+ *   empty program, which fails to exec and makes `git diff` exit 128
+ *   ("external diff died") on every repository with a real change, hostile or
+ *   benign. Confirmed empirically; this was a real, shipped bug (task-5 fix
+ *   round 2). It is not "fixed but strict" — it is broken.
+ * - Simply deleting that `-c` reopens `diff.external` AND leaves `textconv`
+ *   open too, since textconv was never addressed by it at all.
+ *
+ * The actual fix is `--no-ext-diff --no-textconv`, and those flags are
+ * SUBCOMMAND-scoped, not global: they are valid only immediately after a
+ * diff-producing subcommand. `git status --no-ext-diff` exits 129 ("unknown
+ * option"), confirmed empirically — so they cannot go in the `-c`-based
+ * HARDENING prefix, which is shared by every subcommand `runGit` might run.
+ * Kept deliberately small and explicit rather than trying to enumerate every
+ * git subcommand that can produce a diff.
+ */
+const DIFF_PRODUCING_SUBCOMMANDS = new Set(['diff', 'log', 'show', 'format-patch'])
+
+/** Inserts the diff-safety flags right after args[0] when it names one of the
+ * subcommands above; otherwise returns args unchanged (most subcommands, e.g.
+ * `status`, reject these flags outright). */
+function withDiffSafety(args: string[]): string[] {
+  const [subcommand, ...rest] = args
+  if (!subcommand || !DIFF_PRODUCING_SUBCOMMANDS.has(subcommand)) return args
+  return [subcommand, '--no-ext-diff', '--no-textconv', ...rest]
+}
 
 /**
  * This prefix deliberately does NOT include a `--` before the caller's `args`.
@@ -62,12 +96,21 @@ function childEnv(): NodeJS.ProcessEnv {
   }
 }
 
-export interface GitResult { stdout: string; stderr: string; code: number }
+/**
+ * `code` is `number` for a normal git exit (including a nonzero one, e.g.
+ * `128`) but can be the STRING `'ENOENT'` (or another errno name) when the
+ * child process never started at all — e.g. `git` absent from the hardcoded
+ * `PATH`. Node's own `ExecFileException.code` is typed `number | string` for
+ * exactly this reason; widened here to match, deliberately. Callers must
+ * narrow (e.g. `typeof code === 'number'`) before doing exit-code arithmetic,
+ * rather than this file casting the string case away.
+ */
+export interface GitResult { stdout: string; stderr: string; code: number | string }
 
 /** THE ONLY PATH TO GIT. test/rungit.test.ts greps src/ to enforce that. */
 export function runGit(repoPath: string, args: string[], opts: { timeoutMs?: number } = {}): Promise<GitResult> {
   const abs = resolve(repoPath)
-  const argv = [...HARDENING, '-C', abs, ...args]
+  const argv = [...HARDENING, '-C', abs, ...withDiffSafety(args)]
 
   return new Promise((res) => {
     execFile('git', argv, {
@@ -75,7 +118,9 @@ export function runGit(repoPath: string, args: string[], opts: { timeoutMs?: num
       timeout: opts.timeoutMs ?? 5000,
       maxBuffer: 16 * 1024 * 1024,
     }, (err, stdout, stderr) => {
-      res({ stdout, stderr, code: err ? ((err as { code?: number }).code ?? 1) : 0 })
+      // err.code is already number | string per Node's own ExecFileException
+      // type — no cast needed, and none should be added (see GitResult above).
+      res({ stdout, stderr, code: err ? (err.code ?? 1) : 0 })
     })
   })
 }
