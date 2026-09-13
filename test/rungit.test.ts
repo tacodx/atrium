@@ -114,10 +114,22 @@ test('vector: a bare .git/hooks/post-index-change fires with zero config entries
  *
  * Together these do not depend on spotting the literal string "git" at a call
  * site, which is exactly what a variable-held name or an alias defeats.
+ *
+ * Allowlist, besides rungit.ts itself: `src/core/actions.ts` (Task 7). That
+ * file is the OTHER, deliberate `execFile` call site the design review
+ * settled on — the general `exec` action primitive (open an editor, open a
+ * terminal) that every provider's non-git actions go through, per its own
+ * doc comment: "execFile(cmd, args[]) with NO shell ... NOT sufficient for
+ * git, where the injection is in the callee's own config (see runGit, §8.6).
+ * This is the general rule for every other exec action." It is still
+ * execFile-only (no shell), so the project-wide "no shell, ever" invariant
+ * holds; this allowlist entry only narrows what this specific git-focused
+ * tripwire checks, it does not exempt actions.ts from that invariant.
  */
 test('no source file calls git outside runGit (tripwire, not a proof)', () => {
   const CHILD_PROCESS_IMPORT = /\bfrom\s+['"](?:node:)?child_process['"]|require\(\s*['"](?:node:)?child_process['"]\s*\)/
   const BUN_SPAWN_CALL = /\bBun\.(?:spawn|spawnSync)\s*\(/
+  const ALLOWED = new Set([join('src', 'core', 'rungit.ts'), join('src', 'core', 'actions.ts')])
 
   function walk(dir: string): string[] {
     const out: string[] = []
@@ -132,7 +144,7 @@ test('no source file calls git outside runGit (tripwire, not a proof)', () => {
 
   const offenders: string[] = []
   for (const file of walk('src')) {
-    if (file === join('src', 'core', 'rungit.ts')) continue
+    if (ALLOWED.has(file)) continue
     const content = readFileSync(file, 'utf8')
     if (CHILD_PROCESS_IMPORT.test(content)) offenders.push(`${file}: imports node:child_process`)
     if (BUN_SPAWN_CALL.test(content)) offenders.push(`${file}: calls Bun.spawn/Bun.spawnSync`)

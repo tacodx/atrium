@@ -4,6 +4,9 @@ import { embeddedFiles } from 'bun'
 import { checkRequest } from './gate'
 import { createAuth } from './auth'
 import { endpointPath, removeEndpointIfOwned, buildExecLine, currentExecContext } from '../core/paths'
+import { createRegistry } from '../core/registry'
+import { createScheduler } from '../core/scheduler'
+import { handleRoute, serveAsset } from './routes'
 
 const SECURITY_HEADERS = (port: number) => ({
   'x-content-type-options': 'nosniff',
@@ -39,6 +42,13 @@ export interface ServeConfig {
 
 export async function startServer(cfg: ServeConfig) {
   const auth = createAuth()
+  // No providers are registered yet — Plan 2 (git/claude/obsidian/mail) is the
+  // consumer. This is live wiring for /api/state and the action-dispatch
+  // route, not a stub: once a later task calls registry.register(...) before
+  // startServer runs, /api/state and POST /api/actions/:providerId/:actionId
+  // work with no change here.
+  const registry = createRegistry()
+  const scheduler = createScheduler(registry, { config: {} })
   const nonce = crypto.randomUUID()
   const startedAt = new Date().toISOString()
   const headers = SECURITY_HEADERS(cfg.port)
@@ -59,7 +69,7 @@ export async function startServer(cfg: ServeConfig) {
       development: false,
       error: () => new Response('internal error', { status: 500, headers }),
 
-      fetch(req, srv) {
+      async fetch(req, srv) {
         const gate = checkRequest(req, cfg.port)
         if (!gate.ok) return new Response('forbidden', { status: gate.status, headers })
 
@@ -81,11 +91,18 @@ export async function startServer(cfg: ServeConfig) {
             : new Response('expected websocket', { status: 426, headers })
         }
 
+        // Static assets, PRE-AUTH and deliberately so: the page itself must
+        // load before any token exists, since the handoff token arrives in
+        // the URL fragment and is read by the page's own JavaScript. Still
+        // behind the Host/Origin gate above. Manifest-only — see routes.ts.
+        const asset = await serveAsset(path, headers)
+        if (asset) return asset
+
         if (!auth.verifyBearer(req)) {
           return new Response('unauthorized', { status: 401, headers })
         }
 
-        return new Response('not found', { status: 404, headers })
+        return handleRoute(req, { registry, snapshot: scheduler.snapshot, headers })
       },
 
       websocket: {
