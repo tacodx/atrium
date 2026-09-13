@@ -7,6 +7,20 @@ import { join, resolve } from 'node:path'
 const BIN = resolve(process.argv[2] ?? './atrium')
 const DIST = process.argv[3] ?? './web-dist'
 
+// Explicit, unmissable opt-out. DEFAULT IS STRICT: with this unset, a zero
+// asset-embed count or a non-200 `GET /` is a hard failure and exits non-zero,
+// exactly as this assertion has always worked. Set only at the call site that
+// knows why it's safe to relax right now — Task 4's own verification run does
+// this explicitly (see task-4-report.md), because src/index.ts genuinely does
+// not reference the generated asset manifest yet and src/server/routes.ts
+// (Task 7) is what wires real asset serving in. A warning nobody re-hardens
+// is exactly how a control like this dies quietly — its failure mode (HTTP
+// 200 serving a blank page, or assets silently dropped by dead-code
+// elimination) does not announce itself — so this stays a hard failure by
+// default and the relaxation must be named explicitly by whoever invokes it.
+// Task 7 is expected to retire the need for this flag entirely.
+const ALLOW_UNWIRED_ASSETS = process.env.ATRIUM_ALLOW_UNWIRED_ASSETS === '1'
+
 function countFiles(dir: string): number {
   let n = 0
   for (const e of readdirSync(dir, { withFileTypes: true })) {
@@ -26,15 +40,19 @@ renameSync(DIST, parked)
 // SPA is src/server/routes.ts's job (Task 7); until that lands, nothing in
 // this entry point's import graph references the generated ASSET_PATHS
 // manifest, so `bun build --compile` drops it via dead-code elimination and
-// the embedded count is genuinely 0. The checks below that depend on that
-// wiring (asset-embed count, GET /, the served CSS/JS) are demoted to
-// warnings rather than failures for that reason: they document a real,
-// temporary gap instead of blocking every task between here and Task 7, and
-// they go back to being real pass/fail signal on their own, with no further
-// edit needed, the moment routes.ts actually serves these paths.
+// the embedded count is genuinely 0, and `GET /` falls through to the bearer
+// check (401) since there is no route for it. The two checks below that
+// depend on that wiring (asset-embed count, GET /) are hard failures UNLESS
+// ATRIUM_ALLOW_UNWIRED_ASSETS=1 is set (see above) — Task 7 is the
+// re-hardening point: once routes.ts actually serves these paths, both checks
+// pass on their own with no script edit needed, opt-out or not.
 let failures: string[] = []
-let warnings: string[] = []
+let relaxed: string[] = []
 let embedded = 0
+
+if (ALLOW_UNWIRED_ASSETS) {
+  console.warn('RELAXED: asset embedding + GET / unchecked (no routes.ts yet; Task 7 re-hardens)')
+}
 try {
   const proc = Bun.spawn([BIN, 'serve', '--port', '7373'], { cwd: '/tmp', stdout: 'pipe', stderr: 'pipe' })
 
@@ -63,10 +81,16 @@ try {
     await fetch('http://127.0.0.1:7373/healthz', { headers: { host: '127.0.0.1:7373' } })
   ).json()
   embedded = Number(health.assets)
-  if (embedded < expected) warnings.push(`embedded ${embedded} < dist ${expected} — not wired until Task 7`)
+  if (embedded < expected) {
+    const msg = `embedded ${embedded} < dist ${expected} — DCE dropped assets`
+    if (ALLOW_UNWIRED_ASSETS) relaxed.push(msg); else failures.push(msg)
+  }
 
   const html = await fetch('http://127.0.0.1:7373/')
-  if (html.status !== 200) warnings.push(`GET / returned ${html.status} — SPA not served until Task 7`)
+  if (html.status !== 200) {
+    const msg = `GET / returned ${html.status}`
+    if (ALLOW_UNWIRED_ASSETS) relaxed.push(msg); else failures.push(msg)
+  }
 
   const body = await html.text()
   const cssHref = body.match(/href="([^"]+\.css)"/)?.[1]
@@ -104,7 +128,7 @@ try {
   if (existsSync(parked)) renameSync(parked, DIST)
 }
 
-for (const w of warnings) console.warn(`packaging warning: ${w}`)
+for (const r of relaxed) console.warn(`  - ${r}`)
 
 if (failures.length) {
   console.error('PACKAGING ASSERTION FAILED:')
