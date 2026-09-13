@@ -27,6 +27,25 @@ const HARDENING = [
 ]
 
 /**
+ * This prefix deliberately does NOT include a `--` before the caller's `args`.
+ * The correct position for `--` is `git <subcommand> [options] -- <pathspecs>`,
+ * and `args[0]` here is the subcommand itself — `runGit` has no way to know
+ * where that subcommand's own options end and its pathspecs begin. Inserting
+ * `--` unconditionally between `-C <abs>` and `args` would produce
+ * `git -C /path -- status`, which is simply invalid.
+ *
+ * That knowledge belongs to the caller, which is the only code that knows its
+ * own argument shape. Consequence, stated plainly: any caller forwarding a
+ * repository-controlled value (a branch name, a file path from a listing,
+ * anything not typed by the operator) as a positional argument MUST supply its
+ * own `--` before it inside `args` (e.g. `runGit(dir, ['log', '--',
+ * untrustedPath])`). Without it, a value beginning with a dash is read as a
+ * flag by git, not as the pathspec it looks like — the same class of injection
+ * this hardening prefix exists to close off, just one layer up, in the
+ * caller's own argv construction.
+ */
+
+/**
  * The child env is an ALLOWLIST built from scratch, and it explicitly SETS
  * GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM. A blanket "scrub all GIT_*" would
  * delete the two variables that make the security tests honest — this machine's
