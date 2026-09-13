@@ -8,6 +8,8 @@ export function createScheduler(registry: Registry, opts: { config: Record<strin
   const timers: ReturnType<typeof setInterval>[] = []
   const watchers: Disposable[] = []
   const listeners = new Set<(id: string, data: unknown) => void>()
+  const controllers = new Set<AbortController>()
+  let started = false
 
   async function runNow(providerId: string, scheduleName: string) {
     const key = `${providerId}:${scheduleName}`
@@ -18,17 +20,28 @@ export function createScheduler(registry: Registry, opts: { config: Record<strin
     if (!p) throw new Error(`unknown provider: ${providerId}`)
 
     const ac = new AbortController()
+    controllers.add(ac)
     const run = (async () => {
       const data = await p.fetch(opts.config[providerId] as never, {
         schedule: scheduleName,
         previous: previousByKey.get(key),
         signal: ac.signal,
       })
-      previousByKey.set(key, data)
-      last.set(providerId, data)
-      for (const l of listeners) l(providerId, data)
+      // A provider is under no obligation to honour ctx.signal, so a run
+      // whose controller stop() already aborted must still not be allowed to
+      // mutate state or notify listeners once it does resolve — otherwise a
+      // fetch in flight at teardown mutates state and fires onUpdate after
+      // the scheduler was supposedly stopped.
+      if (!ac.signal.aborted) {
+        previousByKey.set(key, data)
+        last.set(providerId, data)
+        for (const l of listeners) l(providerId, data)
+      }
       return data
-    })().finally(() => inflight.delete(key))
+    })().finally(() => {
+      inflight.delete(key)
+      controllers.delete(ac)
+    })
 
     inflight.set(key, run)
     return run
@@ -40,6 +53,12 @@ export function createScheduler(registry: Registry, opts: { config: Record<strin
     snapshot: () => Object.fromEntries(last),
 
     start() {
+      // A defensive double-start is a plausible caller mistake, not a
+      // programming error worth crashing on — but a second pass through the
+      // loop below would register a second timer (and watcher) per schedule,
+      // silently doubling every provider's poll rate.
+      if (started) return
+      started = true
       for (const p of registry.all()) {
         for (const s of p.schedules) {
           if (s.runOnStart) void runNow(p.id, s.name)
@@ -56,10 +75,13 @@ export function createScheduler(registry: Registry, opts: { config: Record<strin
     },
 
     stop() {
+      started = false             // so a later start() re-registers timers/watchers
       for (const t of timers) clearInterval(t)
       for (const w of watchers) w.close()
+      for (const ac of controllers) ac.abort()   // best-effort cancellation for providers that honour ctx.signal
       timers.length = 0
       watchers.length = 0
+      controllers.clear()
     },
   }
 }

@@ -131,4 +131,60 @@ describe('scheduler', () => {
     expect(seenDiscoveryPrev).toEqual([undefined, { repos: ['a', 'b'] }])
     expect(seenMetadataPrev).toEqual([undefined, { count: 1 }])
   })
+
+  test('start() is idempotent — a second call does not register a second timer', async () => {
+    const r = createRegistry()
+    let fetches = 0
+    r.register(stub('poll-provider', {
+      schedules: [{ name: 'poll', intervalMs: 20, runOnStart: false }],
+      fetch: async () => { fetches++; return {} },
+    }))
+
+    const s = createScheduler(r, { config: { 'poll-provider': {} } })
+    s.start()
+    s.start()               // a defensive double-start must be a no-op
+    await Bun.sleep(50)     // one 20ms timer ticks at ~20ms and ~40ms => 2;
+                             // a doubled (buggy) timer pair would tick 4 times
+    s.stop()
+
+    expect(fetches).toBe(2)
+  })
+
+  test('start -> stop -> start works: stop() resets the started flag', async () => {
+    const r = createRegistry()
+    let fetches = 0
+    r.register(stub('poll-provider', {
+      schedules: [{ name: 'poll', intervalMs: 3_600_000, runOnStart: true }],
+      fetch: async () => { fetches++; return {} },
+    }))
+
+    const s = createScheduler(r, { config: { 'poll-provider': {} } })
+    s.start()
+    await Bun.sleep(5)
+    s.stop()
+    s.start()               // must actually restart, not be swallowed as a "second" start
+    await Bun.sleep(5)
+    s.stop()
+
+    expect(fetches).toBe(2)  // one runOnStart fetch per start() cycle
+  })
+
+  test('stop() is quiescent — a fetch already in flight does not mutate state or notify after stop', async () => {
+    const r = createRegistry()
+    r.register(stub('slow', {
+      fetch: async () => { await Bun.sleep(30); return { done: true } },
+    }))
+
+    const s = createScheduler(r, { config: { slow: {} } })
+    let notified = 0
+    s.onUpdate(() => { notified++ })
+
+    const inFlight = s.runNow('slow', 'poll')   // kick off, do not await yet
+    s.stop()                                     // stop while the fetch is still running
+    await inFlight                               // let it actually resolve
+    await Bun.sleep(10)                          // give any wrongly-surviving post-await work a chance to run
+
+    expect(s.snapshot()).toEqual({})
+    expect(notified).toBe(0)
+  })
 })
