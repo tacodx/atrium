@@ -262,7 +262,18 @@ renameSync(DIST, parked)
 let failures: string[] = []
 try {
   const proc = Bun.spawn([BIN, 'skeleton'], { cwd: '/tmp', stdout: 'pipe', stderr: 'pipe' })
-  await Bun.sleep(500)
+
+  // Poll, never sleep a fixed amount: a fixed wait is flaky on a loaded box
+  // and slow on an idle one.
+  let up = false
+  for (let i = 0; i < 100; i++) {
+    try { await fetch('http://127.0.0.1:7373/__embedded'); up = true; break } catch { await Bun.sleep(50) }
+  }
+  if (!up) {
+    console.error('PACKAGING ASSERTION FAILED: binary never started listening within 5s')
+    console.error(await new Response(proc.stderr).text())
+    process.exit(1)
+  }
 
   const embedded = Number(await (await fetch('http://127.0.0.1:7373/__embedded')).text())
   if (embedded < expected) failures.push(`embedded ${embedded} < dist ${expected} — DCE dropped assets`)
@@ -1015,12 +1026,34 @@ switch (cmd) {
 
 Subcommands `open`, `install`, `uninstall`, `doctor` and `rotate-token` are added in Plan 4.
 
-- [ ] **Step 8: Run the tests to verify they pass**
+- [ ] **Step 8: Retire the skeleton**
+
+`src/skeleton.ts` was Task 1's throwaway; `serve.ts` now supersedes it. Delete it, and repoint the packaging assertion at the real entry point:
+
+```bash
+git rm -q src/skeleton.ts
+```
+
+In `scripts/assert-package.ts`, change the spawn from `[BIN, 'skeleton']` to `[BIN, 'serve', '--port', '7373']`, and change the `/__embedded` probe to `/healthz` — which now needs the `host` header the gate requires:
+
+```ts
+try {
+  await fetch('http://127.0.0.1:7373/healthz', { headers: { host: '127.0.0.1:7373' } })
+  up = true; break
+} catch { await Bun.sleep(50) }
+```
+
+Keep the asset-count assertion: expose the embedded count on `/healthz` as `assets: embeddedFiles.length` rather than re-adding a debug route.
+
+- [ ] **Step 9: Run the tests and the packaging assertion**
 
 Run: `bun test test/serve.test.ts test/paths.test.ts`
 Expected: PASS, 7 tests.
 
-- [ ] **Step 9: Commit**
+Run: `bun run vite build && bun build --compile --asset ./web-dist --outfile=atrium src/index.ts && bun run scripts/assert-package.ts ./atrium ./web-dist`
+Expected: `packaging ok: N assets embedded, served from a foreign cwd` — proving the assertion still holds against the real server, not just the skeleton.
+
+- [ ] **Step 10: Commit**
 
 ```bash
 git add -A && git commit -m "feat: server wiring with healthz nonce, endpoint.json and exit 78"
