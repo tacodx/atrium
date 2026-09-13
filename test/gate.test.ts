@@ -62,6 +62,22 @@ describe('Origin', () => {
   test('allows an absent origin on a read-only GET', () => {
     expect(checkRequest(mk({ host: '127.0.0.1:7373' }), PORT).ok).toBe(true)
   })
+
+  test('allows an absent origin on a read-only HEAD', () => {
+    expect(checkRequest(mk({ host: '127.0.0.1:7373' }, 'HEAD'), PORT).ok).toBe(true)
+  })
+
+  test('rejects an absent origin on OPTIONS', () => {
+    expect(checkRequest(mk({ host: '127.0.0.1:7373' }, 'OPTIONS'), PORT).ok).toBe(false)
+  })
+
+  test('rejects an absent origin on a non-standard verb (PROPFIND)', () => {
+    expect(checkRequest(mk({ host: '127.0.0.1:7373' }, 'PROPFIND'), PORT).ok).toBe(false)
+  })
+
+  test('allows a non-standard verb (PROPFIND) WITH a valid origin', () => {
+    expect(checkRequest(mk({ host: '127.0.0.1:7373', origin: 'http://127.0.0.1:7373' }, 'PROPFIND'), PORT).ok).toBe(true)
+  })
 })
 
 describe('Sec-Fetch-Site', () => {
