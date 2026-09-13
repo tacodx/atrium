@@ -2,7 +2,8 @@ import type { Registry } from './registry'
 import type { Disposable } from './contract'
 
 export function createScheduler(registry: Registry, opts: { config: Record<string, unknown> }) {
-  const last = new Map<string, unknown>()          // providerId -> last Data
+  const last = new Map<string, unknown>()          // providerId -> last Data (display value for snapshot()/onUpdate — whichever schedule most recently produced data)
+  const previousByKey = new Map<string, unknown>() // `${providerId}:${scheduleName}` -> that schedule's own last Data (feeds ctx.previous — never another schedule's output)
   const inflight = new Map<string, Promise<unknown>>()
   const timers: ReturnType<typeof setInterval>[] = []
   const watchers: Disposable[] = []
@@ -20,9 +21,10 @@ export function createScheduler(registry: Registry, opts: { config: Record<strin
     const run = (async () => {
       const data = await p.fetch(opts.config[providerId] as never, {
         schedule: scheduleName,
-        previous: last.get(providerId),
+        previous: previousByKey.get(key),
         signal: ac.signal,
       })
+      previousByKey.set(key, data)
       last.set(providerId, data)
       for (const l of listeners) l(providerId, data)
       return data

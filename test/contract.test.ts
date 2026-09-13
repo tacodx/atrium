@@ -102,4 +102,33 @@ describe('scheduler', () => {
     s.stop()
     expect(emitted).toBeGreaterThan(0)
   })
+
+  test('previous is scoped per schedule — a two-schedule provider never sees the other schedule\'s previous', async () => {
+    const r = createRegistry()
+    const seenDiscoveryPrev: unknown[] = []
+    const seenMetadataPrev: unknown[] = []
+    r.register(stub('git', {
+      schedules: [
+        { name: 'discovery', intervalMs: 600_000, runOnStart: false },
+        { name: 'metadata', intervalMs: 30_000, runOnStart: false },
+      ],
+      fetch: async (_cfg, ctx) => {
+        if (ctx.schedule === 'discovery') {
+          seenDiscoveryPrev.push(ctx.previous)
+          return { repos: ['a', 'b'] }
+        }
+        seenMetadataPrev.push(ctx.previous)
+        return { count: seenMetadataPrev.length }
+      },
+    }))
+
+    const s = createScheduler(r, { config: { git: {} } })
+    await s.runNow('git', 'discovery')   // discovery #1: own previous is undefined
+    await s.runNow('git', 'metadata')    // metadata #1: own previous is undefined, NOT discovery's repo list
+    await s.runNow('git', 'metadata')    // metadata #2: own previous is metadata #1's result
+    await s.runNow('git', 'discovery')   // discovery #2: own previous is discovery #1's result, NOT metadata's count
+
+    expect(seenDiscoveryPrev).toEqual([undefined, { repos: ['a', 'b'] }])
+    expect(seenMetadataPrev).toEqual([undefined, { count: 1 }])
+  })
 })
