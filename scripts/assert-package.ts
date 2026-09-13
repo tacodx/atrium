@@ -86,6 +86,18 @@ try {
     if (ALLOW_UNWIRED_ASSETS) relaxed.push(msg); else failures.push(msg)
   }
 
+  // Review finding 4: proves src/core/paths.ts's /$bunfs/ detection end to
+  // end, against the real compiled binary — not just the unit-tested pure
+  // predicate. The failure mode this guards is silent and severe: a wrong
+  // detection produces a systemd ExecStart pointing at a path that does not
+  // exist, and nothing about that fails loudly at install time. This is a
+  // hard failure regardless of ATRIUM_ALLOW_UNWIRED_ASSETS — it has nothing
+  // to do with static asset serving.
+  const execLine = String(health.execLine)
+  if (execLine.includes('$bunfs')) failures.push(`execLine contains a $bunfs path: ${execLine}`)
+  else if (!execLine.startsWith('/')) failures.push(`execLine is not an absolute path: ${execLine}`)
+  else if (!existsSync(execLine)) failures.push(`execLine does not exist on disk: ${execLine}`)
+
   const html = await fetch('http://127.0.0.1:7373/')
   if (html.status !== 200) {
     const msg = `GET / returned ${html.status}`

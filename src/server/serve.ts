@@ -1,9 +1,9 @@
-import { mkdirSync, writeFileSync, unlinkSync } from 'node:fs'
+import { mkdirSync, chmodSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { embeddedFiles } from 'bun'
 import { checkRequest } from './gate'
 import { createAuth } from './auth'
-import { endpointPath } from '../core/paths'
+import { endpointPath, removeEndpointIfOwned, buildExecLine, currentExecContext } from '../core/paths'
 
 const SECURITY_HEADERS = (port: number) => ({
   'x-content-type-options': 'nosniff',
@@ -40,8 +40,16 @@ export interface ServeConfig {
 export async function startServer(cfg: ServeConfig) {
   const auth = createAuth()
   const nonce = crypto.randomUUID()
+  const startedAt = new Date().toISOString()
   const headers = SECURITY_HEADERS(cfg.port)
   const wsAuthTimeoutMs = cfg.wsAuthTimeoutMs ?? DEFAULT_WS_AUTH_TIMEOUT_MS
+  // Task 4 review finding 4: proves the /$bunfs/ detection end to end. Computed
+  // once — the exec context cannot change during the process's lifetime — and
+  // exposed on /healthz so the packaging assertion can confirm, against the
+  // real compiled binary, that this is a real on-disk path with no $bunfs
+  // segment (the failure mode this is guarding against is a systemd unit
+  // pointing at a path that doesn't exist).
+  const execLine = buildExecLine(currentExecContext())
 
   let server: ReturnType<typeof Bun.serve>
   try {
@@ -61,7 +69,7 @@ export async function startServer(cfg: ServeConfig) {
         // the token-gated routes cannot serve that purpose (§9).
         if (path === '/healthz') {
           return Response.json(
-            { ok: true, pid: process.pid, nonce, assets: embeddedFiles.length },
+            { ok: true, pid: process.pid, nonce, assets: embeddedFiles.length, execLine },
             { headers },
           )
         }
@@ -118,10 +126,26 @@ export async function startServer(cfg: ServeConfig) {
 
   const env = cfg.env ?? process.env
   const ep = endpointPath(env)
-  mkdirSync(dirname(ep), { recursive: true, mode: 0o700 })
-  writeFileSync(ep, JSON.stringify({ url: String(server.url), pid: process.pid, nonce }), { mode: 0o600 })
+  const epDir = dirname(ep)
+  mkdirSync(epDir, { recursive: true, mode: 0o700 })
+  // Task 4 review finding 3: `mkdirSync`'s `mode` only applies when it actually
+  // creates the directory — an already-existing directory (a later task's own
+  // config-dir setup, once one exists) keeps whatever mode it already had.
+  // Spec §8.5 requires this directory be 0700 unconditionally, so assert it
+  // every startup rather than only on first creation.
+  chmodSync(epDir, 0o700)
 
-  const cleanup = () => { try { unlinkSync(ep) } catch {} }
+  // NOTE (Task 4 review finding 2, deliberately not fully fixed here): two
+  // concurrent instances share this one path — v1 assumes a single instance,
+  // so instance B starting on a different port still overwrites instance A's
+  // file. That overwrite-on-start gap is carried forward to a later plan
+  // (`atrium open` is the eventual consumer that cares). What IS fixed is the
+  // destructive half: shutdown below only ever removes a file that still
+  // names *this* pid, so B's shutdown can no longer delete a file that by
+  // then describes A.
+  writeFileSync(ep, JSON.stringify({ url: String(server.url), pid: process.pid, nonce, startedAt }), { mode: 0o600 })
+
+  const cleanup = () => { removeEndpointIfOwned(ep, process.pid) }
   process.on('exit', cleanup)
   process.on('SIGTERM', () => { cleanup(); process.exit(0) })
   process.on('SIGINT', () => { cleanup(); process.exit(0) })

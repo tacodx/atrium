@@ -1,4 +1,7 @@
 import { test, expect } from 'bun:test'
+import { mkdtempSync, mkdirSync, statSync, existsSync, readFileSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { startServer } from '../src/server/serve'
 
 // bun's global WebSocket supports a non-standard second-arg `{ headers }` init
@@ -115,4 +118,111 @@ test('websocket: an oversized pre-auth frame is rejected, never reaches the app'
   expect(ended === 'closed' || ended === 'errored').toBe(true)
   expect(received).toEqual([])          // never buffered/parsed, so never echoed or acted on
   s.stop()
+})
+
+// --- Review finding 1: endpoint.json's shape. ---
+//
+// nonce proves identity (matched against /healthz, so a launcher can tell it
+// reached the process it just started rather than a port squatter); startedAt
+// supports staleness (a later consumer deciding whether a file left by a
+// crashed instance is worth trusting). Both are written; here the shape is
+// checked directly against the file rather than inferred from behavior.
+// Every test below uses `env` (a scratch directory, never the developer's
+// real $HOME or $XDG_RUNTIME_DIR) to write and inspect endpoint.json.
+
+test('endpoint.json records url, pid, nonce, and an ISO-8601 startedAt', async () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'atrium-endpoint-'))
+  try {
+    const s = await startServer({ port: 7400, env: { XDG_RUNTIME_DIR: scratch } })
+    const epPath = join(scratch, 'atrium', 'endpoint.json')
+    const written = JSON.parse(readFileSync(epPath, 'utf8'))
+    expect(written.pid).toBe(process.pid)
+    expect(typeof written.nonce).toBe('string')
+    expect(typeof written.url).toBe('string')
+    expect(typeof written.startedAt).toBe('string')
+    expect(written.startedAt).toBe(new Date(written.startedAt).toISOString())  // round-trips as ISO-8601
+    s.stop()
+  } finally {
+    rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+// --- Review finding 3: the parent directory's mode must be re-asserted. ---
+//
+// mkdirSync's `mode` option only applies when it actually creates the
+// directory; an already-existing one (as a later task's own config-dir setup
+// will leave behind) keeps whatever mode it already had. Spec §8.5 requires
+// 0700 unconditionally, so this pre-creates the directory looser and asserts
+// startServer tightens it back up regardless.
+
+test('endpoint.json parent directory is forced to 0700 even if it pre-existed looser', async () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'atrium-endpoint-'))
+  try {
+    const dir = join(scratch, 'atrium')
+    mkdirSync(dir, { recursive: true, mode: 0o755 })
+    expect(statSync(dir).mode & 0o777).toBe(0o755)   // sanity: the pre-existing looser mode took
+
+    const s = await startServer({ port: 7401, env: { XDG_RUNTIME_DIR: scratch } })
+    expect(statSync(dir).mode & 0o777).toBe(0o700)
+    s.stop()
+  } finally {
+    rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+// --- "Also": SIGTERM/SIGINT cleanup, proven under a real signal to a real process. ---
+//
+// bun test does not emit a Node-style 'exit' event when a test file finishes
+// (see src/server/serve.ts's comment on the `.stop()` wrapper), so a test that
+// only calls startServer() in-process and inspects the result cannot tell us
+// anything about the SIGTERM/SIGINT handlers — those only run in a process
+// that actually receives the signal. These two tests spawn the real compiled
+// entry point as a genuine child process, signal it from the OS, and check
+// the file on disk afterward.
+
+async function waitForFile(path: string, timeoutMs = 5000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (existsSync(path)) return true
+    await Bun.sleep(50)
+  }
+  return false
+}
+
+test('SIGTERM removes endpoint.json on a real signal to a real process', async () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'atrium-endpoint-'))
+  const epPath = join(scratch, 'atrium', 'endpoint.json')
+  try {
+    const proc = Bun.spawn(
+      [process.execPath, 'run', 'src/index.ts', 'serve', '--port', '7402'],
+      { env: { ...process.env, XDG_RUNTIME_DIR: scratch }, stderr: 'pipe', stdout: 'pipe' },
+    )
+    expect(await waitForFile(epPath)).toBe(true)   // server actually started and wrote the file
+
+    proc.kill('SIGTERM')
+    await proc.exited
+
+    expect(existsSync(epPath)).toBe(false)
+  } finally {
+    rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+test('SIGINT removes endpoint.json on a real signal to a real process', async () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'atrium-endpoint-'))
+  const epPath = join(scratch, 'atrium', 'endpoint.json')
+  try {
+    const proc = Bun.spawn(
+      [process.execPath, 'run', 'src/index.ts', 'serve', '--port', '7403'],
+      { env: { ...process.env, XDG_RUNTIME_DIR: scratch }, stderr: 'pipe', stdout: 'pipe' },
+    )
+    expect(await waitForFile(epPath)).toBe(true)
+
+    proc.kill('SIGINT')
+    await proc.exited
+
+    expect(existsSync(epPath)).toBe(false)
+  } finally {
+    rmSync(scratch, { recursive: true, force: true })
+  }
 })
