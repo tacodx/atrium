@@ -8,7 +8,7 @@
   "scripts": {
     "build:web": "vite build",
     "gen:assets": "bun run scripts/gen-assets.ts",
-    "build:server": "bun run gen:assets && bun build --compile --outfile=atrium src/skeleton.ts",
+    "build:server": "bun run gen:assets && bun build --compile --outfile=atrium src/index.ts",
     "build": "bun run build:web && bun run build:server",
     "assert:package": "bun run scripts/assert-package.ts ./atrium ./web-dist"
   },
