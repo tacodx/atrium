@@ -115,39 +115,104 @@ test('vector: a bare .git/hooks/post-index-change fires with zero config entries
  * Together these do not depend on spotting the literal string "git" at a call
  * site, which is exactly what a variable-held name or an alias defeats.
  *
- * Allowlist, besides rungit.ts itself: `src/core/actions.ts` (Task 7). That
- * file is the OTHER, deliberate `execFile` call site the design review
- * settled on — the general `exec` action primitive (open an editor, open a
- * terminal) that every provider's non-git actions go through, per its own
- * doc comment: "execFile(cmd, args[]) with NO shell ... NOT sufficient for
- * git, where the injection is in the callee's own config (see runGit, §8.6).
- * This is the general rule for every other exec action." It is still
- * execFile-only (no shell), so the project-wide "no shell, ever" invariant
- * holds; this allowlist entry only narrows what this specific git-focused
- * tripwire checks, it does not exempt actions.ts from that invariant.
+ * `src/core/actions.ts` (Task 7) is the OTHER deliberate `execFile` call site
+ * the design review settled on — the general `exec` action primitive (open an
+ * editor, open a terminal) that every provider's non-git actions go through,
+ * per its own doc comment: "execFile(cmd, args[]) with NO shell ... NOT
+ * sufficient for git ... This is the general rule for every other exec
+ * action." A file-level allowlist entry for it was tried first and rejected
+ * on review: exempting it from layers 1/2 entirely would leave the ONE file
+ * whose whole job is spawning subprocesses completely unscanned for a git
+ * call, which is exactly where a future contributor is likeliest to add one
+ * without thinking — silently defeating this tripwire's actual purpose.
+ *
+ * So `actions.ts` gets a narrower, third layer instead of a blanket
+ * exemption: layers 1 and 2 don't apply to it (it legitimately imports
+ * `child_process`), but it is still scanned for a literal reference to a
+ * `git` command or binary — a quoted `'git'`/`"git"`/`` `git` ``, or a quoted
+ * path ending in `.../git` (`'/usr/bin/git'` and similar). This is
+ * necessarily narrower than layers 1/2 (a variable built from string
+ * concatenation, e.g. `'gi' + 't'`, would still slip past it — the same
+ * "not a proof" limitation the module doc already accepts for every other
+ * evasion this tripwire can't chase), but it is the correct trade-off named
+ * by review: a git-specific check on the one file that needs a
+ * child_process/Bun.spawn exemption, not a wholesale exemption from the
+ * whole tripwire.
  */
-test('no source file calls git outside runGit (tripwire, not a proof)', () => {
-  const CHILD_PROCESS_IMPORT = /\bfrom\s+['"](?:node:)?child_process['"]|require\(\s*['"](?:node:)?child_process['"]\s*\)/
-  const BUN_SPAWN_CALL = /\bBun\.(?:spawn|spawnSync)\s*\(/
-  const ALLOWED = new Set([join('src', 'core', 'rungit.ts'), join('src', 'core', 'actions.ts')])
+const RUNGIT_PATH = join('src', 'core', 'rungit.ts')
+const ACTIONS_PATH = join('src', 'core', 'actions.ts')
 
-  function walk(dir: string): string[] {
-    const out: string[] = []
-    for (const entry of readdirSync(dir)) {
-      const p = join(dir, entry)
-      const st = statSync(p)
-      if (st.isDirectory()) out.push(...walk(p))
-      else if (entry.endsWith('.ts')) out.push(p)
-    }
-    return out
+const CHILD_PROCESS_IMPORT = /\bfrom\s+['"](?:node:)?child_process['"]|require\(\s*['"](?:node:)?child_process['"]\s*\)/
+const BUN_SPAWN_CALL = /\bBun\.(?:spawn|spawnSync)\s*\(/
+// Backreference to the opening quote so this only matches a quoted string
+// whose ENTIRE content is "git" or ends in a path separator then "git" —
+// deliberately narrow enough to leave "legit", "digit", ".gitignore", and
+// "gitattributes" alone (all real substrings already present in this
+// codebase's comments/fixtures) while still catching the bare command name
+// and any absolute-path binary name reaching a spawn call.
+const GIT_LITERAL = /(['"`])(?:[^'"`]*[\\/])?git\1/i
+
+function scanFile(file: string, content: string): string[] {
+  const offenders: string[] = []
+  if (file === ACTIONS_PATH) {
+    if (GIT_LITERAL.test(content)) offenders.push(`${file}: references git directly`)
+    return offenders
   }
+  if (CHILD_PROCESS_IMPORT.test(content)) offenders.push(`${file}: imports node:child_process`)
+  if (BUN_SPAWN_CALL.test(content)) offenders.push(`${file}: calls Bun.spawn/Bun.spawnSync`)
+  return offenders
+}
 
+function walk(dir: string): string[] {
+  const out: string[] = []
+  for (const entry of readdirSync(dir)) {
+    const p = join(dir, entry)
+    const st = statSync(p)
+    if (st.isDirectory()) out.push(...walk(p))
+    else if (entry.endsWith('.ts')) out.push(p)
+  }
+  return out
+}
+
+test('no source file calls git outside runGit (tripwire, not a proof)', () => {
   const offenders: string[] = []
   for (const file of walk('src')) {
-    if (ALLOWED.has(file)) continue
-    const content = readFileSync(file, 'utf8')
-    if (CHILD_PROCESS_IMPORT.test(content)) offenders.push(`${file}: imports node:child_process`)
-    if (BUN_SPAWN_CALL.test(content)) offenders.push(`${file}: calls Bun.spawn/Bun.spawnSync`)
+    if (file === RUNGIT_PATH) continue
+    offenders.push(...scanFile(file, readFileSync(file, 'utf8')))
   }
   expect(offenders).toEqual([])
+})
+
+// --- Pinning the actions.ts precision fix (coordinator fix-round-1 finding) ---
+//
+// The file-level allowlist that used to exempt actions.ts entirely would have
+// let a real `execFile('git', ...)` inside actions.ts pass silently. These
+// two tests pin the narrower replacement directly against scanFile/GIT_LITERAL
+// — no filesystem mutation needed, since scanFile takes content as a string.
+// A real-file mutation check (edit actions.ts, run this suite, revert) is
+// recorded in task-7-report.md as the equivalent of the reviewer's own
+// attack-the-real-artifact methodology; these are the permanent, automated
+// pin of the same distinction.
+
+test('actions.ts: its real, legitimate execFile usage does not trip the git-literal check', () => {
+  const real = readFileSync(join('src', 'core', 'actions.ts'), 'utf8')
+  expect(scanFile(ACTIONS_PATH, real)).toEqual([])
+})
+
+test('actions.ts: a synthetic git invocation is caught even though child_process/Bun.spawn are allowed there', () => {
+  const real = readFileSync(join('src', 'core', 'actions.ts'), 'utf8')
+
+  const bareCommand = real + `\nexecFile('git', ['status'], () => {})\n`
+  expect(scanFile(ACTIONS_PATH, bareCommand)).toEqual([`${ACTIONS_PATH}: references git directly`])
+
+  const binaryPath = real + `\nexecFile('/usr/bin/git', ['status'], () => {})\n`
+  expect(scanFile(ACTIONS_PATH, binaryPath)).toEqual([`${ACTIONS_PATH}: references git directly`])
+
+  const templateLiteral = real + '\nexecFile(`git`, [`status`], () => {})\n'
+  expect(scanFile(ACTIONS_PATH, templateLiteral)).toEqual([`${ACTIONS_PATH}: references git directly`])
+
+  // Confirms the narrowing didn't just start matching everything: real
+  // substrings already present in this codebase must stay clean.
+  expect(scanFile(ACTIONS_PATH, real + `\nconst f = '.gitignore'\n`)).toEqual([])
+  expect(scanFile(ACTIONS_PATH, real + `\nconst f = 'legit'\n`)).toEqual([])
 })
