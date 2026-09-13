@@ -187,4 +187,36 @@ describe('scheduler', () => {
     expect(s.snapshot()).toEqual({})
     expect(notified).toBe(0)
   })
+
+  test('stop() aborting an in-flight run does not produce an unhandled rejection', async () => {
+    const r = createRegistry()
+    // Mirrors the ordinary way a provider honours ctx.signal: pass it into a
+    // real fetch(url, { signal }), which throws on abort with no extra
+    // provider code. Checking ctx.signal.aborted after an await and throwing
+    // reproduces that shape without a network call.
+    r.register(stub('flaky', {
+      schedules: [{ name: 'poll', intervalMs: 3_600_000, runOnStart: true }],
+      fetch: async (_cfg, ctx) => {
+        await Bun.sleep(20)
+        if (ctx.signal.aborted) throw new Error('AbortError')
+        return {}
+      },
+    }))
+
+    let unhandled: unknown
+    const onUnhandledRejection = (reason: unknown) => { unhandled = reason }
+    process.on('unhandledRejection', onUnhandledRejection)
+
+    try {
+      const s = createScheduler(r, { config: { flaky: {} } })
+      s.start()                 // runOnStart fires the fire-and-forget internal call
+      await Bun.sleep(5)        // let the fetch begin — it sleeps 20ms, so it's in flight
+      s.stop()                  // aborts it mid-flight
+      await Bun.sleep(40)       // let the provider's own sleep finish and throw
+
+      expect(unhandled).toBeUndefined()
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection)
+    }
+  })
 })

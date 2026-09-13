@@ -61,15 +61,25 @@ export function createScheduler(registry: Registry, opts: { config: Record<strin
       started = true
       for (const p of registry.all()) {
         for (const s of p.schedules) {
-          if (s.runOnStart) void runNow(p.id, s.name)
-          timers.push(setInterval(() => void runNow(p.id, s.name), s.intervalMs))
+          // These two call sites are fire-and-forget by construction (nothing
+          // here can await a background poll), which makes them the only
+          // place a rejection needs to be swallowed. stop() now calls
+          // ac.abort(), and the ordinary way a provider honours ctx.signal is
+          // passing it straight into a real fetch(url, { signal }), which
+          // throws AbortError with no extra provider code — without a
+          // .catch() here that throw becomes an unhandled rejection on the
+          // process every time stop() lands mid-flight. runNow's own
+          // returned promise is left rejecting: a direct `await
+          // s.runNow(...)` caller (tests included) must still see failures.
+          if (s.runOnStart) void runNow(p.id, s.name).catch(() => {})
+          timers.push(setInterval(() => void runNow(p.id, s.name).catch(() => {}), s.intervalMs))
         }
         // Watch emits route into the first declared schedule's fetch (the
         // contract's own doc comment: the interval schedule is the fallback
         // path, so a watch-capable provider is expected to declare one).
         const fallback = p.schedules[0]
         if (p.watch && fallback) {
-          watchers.push(p.watch(opts.config[p.id] as never, () => void runNow(p.id, fallback.name)))
+          watchers.push(p.watch(opts.config[p.id] as never, () => void runNow(p.id, fallback.name).catch(() => {})))
         }
       }
     },
