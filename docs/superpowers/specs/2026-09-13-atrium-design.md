@@ -49,6 +49,10 @@ Explicitly out of scope, not deferred-by-accident:
 - **Electron.** Never. Electron's GPU fault on Wayland/amdgpu has already corrupted
   this developer's desktop once via VS Code.
 - **A native desktop shell.** Parked, with findings recorded — see §12.
+- ~~Keyring integration~~ — **reversed from revision 1**, where it was a non-goal on
+  cost grounds. `Bun.secrets` ships in the runtime, needs no dependency, and works in
+  a compiled binary, so the cost argument was simply wrong. It is now the preferred v1
+  credential store (§8.5), with a `0600` file as fallback.
 - **"Waiting on you" mail triage.** Deferred to its own post-v1 task; it cannot be
   planned honestly until a live-credential spike settles Gmail's Sent/Inbox split
   (§7.3).
@@ -151,6 +155,23 @@ active work on it. Replacements:
 | Container | `git -C <parent> check-ignore -q <rel>` exits 0 | **surface the child** |
 | Ambiguous (untracked, unignored) | — | drop, overridable by `git.treatAsContainer` |
 
+**Evaluation is first-match-wins in exactly that order**, because the rows overlap
+with opposite results: a linked worktree at `worktrees/feat` inside a repo whose
+`.gitignore` contains `worktrees/` matches both the worktree row (drop) and the
+container row (surface), and an implementer who tests `check-ignore` first surfaces
+every worktree as a project. A container's **parent is a repo too and also appears** —
+on the reference machine `~/Projects/clients` has 38 tracked files of its own, so
+parent and all five children belong in the list.
+
+The classifier is a heuristic over a hand-written `.gitignore`, not a zero-config
+rule, and two shapes defeat it. An umbrella repo with **no** `.gitignore` leaves its
+children ambiguous, so they are dropped — the same silent loss revision 1 was
+corrected for, recoverable only via `git.treatAsContainer`, which the user has no
+reason to know exists. A repo that gitignores `deps/` and holds a clone there
+surfaces that clone as a project. Both must be reachable from the UI: discovery
+reports dropped-ambiguous candidates so first run can offer them, rather than
+silently deciding.
+
 A validity gate runs before any repo enters the list: reject 0-byte `.git` files,
 dangling gitdir pointers, and anything where `git rev-parse --absolute-git-dir`
 returns empty. Rule 1 needs a config escape hatch (`git.extraRoots`,
@@ -225,6 +246,15 @@ localStorage, which Atrium **never reads** — it also holds the user's Obsidian
 account token in plaintext, and reading LevelDB needs a native addon that dies under
 `--compile`. Instead: a config key `obsidian.locale` (default `en`).
 
+**Shows:** whether today's note exists, recent notes, and gaps in the last 7 days.
+The gap count is the feature the round-trip parse guard above exists to protect — a
+silent parse failure would report a perfect streak or a total absence, both wrong.
+
+**Schedules:** a 30s poll, plus a filesystem watcher on the resolved daily-note
+directory so a note created in Obsidian appears immediately. Nested date formats
+(`YYYY/MMMM/YYYY-MM-DD`) grow a new subdirectory each month, so the watcher watches
+the tree, and inference degrades to `confidence: 'unknown'` rather than guessing.
+
 **Actions:** create today's note from a template (`call`), open a note (`exec`),
 quick-capture appending to a configured file (`call`). Template resolution
 reproduces both of Obsidian's branches (literal vault-relative path, then linkpath
@@ -253,7 +283,11 @@ picks a reachable address, and passes `host: <ip>` + `servername: <hostname>`. A
 integration test asserts a non-empty peer certificate and must fail if the workaround
 is removed.
 
-**v1 scope: the unread list only.** Sender, subject, age, and the three actions.
+**v1 scope: the unread list only.** Sender, subject, age, and **two** actions —
+mark read and archive. "Open in web client" is deliberately cut from v1: it is the
+one mail action that builds a URL from server-supplied data, which §8.7 forbids
+without a design. If it returns, the URL comes from a provider-configured template
+plus a strictly validated message id, never from string concatenation.
 "Waiting on you" is deferred (§4) — on Gmail the user's own replies carry the Sent
 label, not Inbox, so computing it from the configured folder alone misreports every
 answered thread. It needs a second thread-scoped read against the SPECIAL-USE
@@ -385,14 +419,21 @@ Every invocation carries a fixed hardening prefix (command-line `-c` beats repo-
 config): `--no-pager -c core.fsmonitor= -c core.hooksPath=<empty dir Atrium owns>
 -c core.sshCommand= -c core.askPass= -c core.editor=false -c core.pager=cat
 -c diff.external= -c protocol.ext.allow=never`, plus `-C <absolute resolved path>`,
-`--` before positionals, a scrubbed env with no `GIT_*` variables, and a per-repo
-timeout. Blocklists are never viable: `--upload-p=` executes exactly as
-`--upload-pack=` does.
+`--` before positionals, and a per-repo timeout. Blocklists are never viable:
+`--upload-p=` executes exactly as `--upload-pack=` does.
+
+**The env is an allowlist, built from scratch — not `process.env` with `GIT_*`
+stripped.** `runGit()` passes a fixed minimal env and *explicitly sets*
+`GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_SYSTEM=/dev/null`, in production as
+well as in tests, since the `-c` prefix already supplies everything git needs. A
+blanket "scrub all `GIT_*`" would delete exactly the two variables that make §10's
+security tests honest, recreating the false pass those tests exist to catch.
 
 Direct `execFile('git', …)` anywhere else is forbidden by a test that greps the
 source. The fixture test plants `core.fsmonitor`, `diff.external`, a repo-local
 `core.hooksPath` **and** a bare `.git/hooks/post-index-change`, runs under
-`GIT_CONFIG_GLOBAL=/dev/null`, and asserts no marker file appears.
+`GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null`, and asserts no marker file
+appears.
 
 **8.7 Untrusted content rendering.** Mail subjects, sender names, branch names and
 file paths are attacker-controlled strings. React escapes by default; the rule is that
@@ -485,19 +526,39 @@ repositories, a fixture vault, canned IMAP responses.
 2. **Every git security test runs under `GIT_CONFIG_GLOBAL=/dev/null
    GIT_CONFIG_SYSTEM=/dev/null`.** This machine's `~/.gitconfig` sets `core.hookspath`
    elsewhere, which silently makes the hook-RCE test pass here while every second user
-   stays exploitable.
+   stays exploitable. §8.6 sets both variables inside `runGit()` for the same reason;
+   the test must not rely on inheriting them.
 
 **Mutation checks are mandatory** on: the discovery rules and container classifier,
-the daily-note folder inference (flip it back to plain-majority and a test must go
-red — the reference data makes that meaningful), the `unavailable`-vs-zero branch, and
-the request gate's Host comparison.
+the daily-note folder inference, the `unavailable`-vs-zero branch, the request gate's
+Host comparison, and the WebSocket auth gate (a socket that authenticates must have
+received zero state before its auth frame).
+
+Both of the checks that caught revision 1's errors are **generated fixtures**, per
+rule 1 above. Their contents are specified here because a fixture rebuilt from a vague
+description cannot reproduce the check:
+
+*Container regression* — a directory that is itself a git repo with tracked files of
+its own, whose `.gitignore` lists three child directories, each a git repo. Assert
+all four repos surface: the parent **and** all three children. Mutating the container
+rule back to "drop nested repos" must turn this red. This is the shape revision 1 got
+wrong, reproduced without reference to any real path.
+
+*Folder inference* — a fixture vault with two folders. Folder A holds **four**
+date-named notes with the **older** dates (`2026-08-25`, `2026-08-26`, `2026-08-29`,
+`2026-09-02`); folder B holds **three** with the **newer** dates (`2026-09-02`,
+`2026-09-04`, `2026-09-05`). Latest-date-wins picks B; plain-majority picks A. A
+`.trash` directory holds six notes dated later than both (`2026-09-10` onward), which
+must be ignored — if it were counted it would win on both recency *and* count, so the
+same fixture tests the exclusion. Mutating the rule to plain-majority, or dropping the
+`.trash` exclusion, must each turn a test red.
 
 The discovery fixture suite covers every case verified during validation: bare repo,
 linked worktree (branch and detached), submodule, dangling submodule pointer, 0-byte
 `.git` file, symlinked repo, empty repo, mid-rebase, mid-merge, mid-cherry-pick,
-umbrella-with-ignored-children, vendored-tracked-child. Plus a regression test
-asserting `~/Projects/clients` **and all five children** appear — the concrete case
-revision 1 got wrong.
+umbrella-with-ignored-children, vendored-tracked-child, and the two shapes that defeat
+the classifier (§7.1): an umbrella with no `.gitignore`, and a repo gitignoring
+`deps/` that contains a clone.
 
 A post-build packaging assertion runs the compiled binary with the source `dist`
 renamed away and fails CI if `Bun.embeddedFiles.length` is below the dist file count,
@@ -599,7 +660,19 @@ Revision 1 was checked by a 28-agent adversarial pass: nine research dimensions,
 perspective-diverse refuters each (does this exist as described / does it survive our
 actual constraints), and a completeness critic. All nine dimensions returned contested
 load-bearing claims; the critic returned `readyToPlan: false` against revision 1 with
-17 corrections and 11 gaps. This revision incorporates all of them.
+17 corrections and 11 gaps. This revision acts on all of them, but two were resolved
+*against* the research rather than by adopting it, and are flagged here so a future
+reader can re-litigate them instead of assuming they were settled:
+
+- **§9 keeps `systemd-run --user --scope`** where the finding argued for a transient
+  service. The blast radius is one launch helper, and §9's `After=graphical-session
+  .target` fix already addresses the environment half of the objection. Worth a spike,
+  not a redesign.
+- **§8.5 makes the keyring the preferred v1 credential store**, reversing revision 1's
+  §4 non-goal. The reason changed: `Bun.secrets` ships in the runtime, needs no
+  dependency, works in a compiled binary, and is already available on the reference
+  machine — so "too expensive" was never true. The real hazard is that it hangs
+  indefinitely with no internal timeout, which is why §8.5 mandates `Promise.race`.
 
 The two most consequential were both **measurement artifacts in revision 1, not
 reasoning errors**, which is why they survived review: a repo count of 30 that silently
