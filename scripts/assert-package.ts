@@ -7,20 +7,6 @@ import { join, resolve } from 'node:path'
 const BIN = resolve(process.argv[2] ?? './atrium')
 const DIST = process.argv[3] ?? './web-dist'
 
-// Explicit, unmissable opt-out. DEFAULT IS STRICT: with this unset, a zero
-// asset-embed count or a non-200 `GET /` is a hard failure and exits non-zero,
-// exactly as this assertion has always worked. Set only at the call site that
-// knows why it's safe to relax right now — Task 4's own verification run does
-// this explicitly (see task-4-report.md), because src/index.ts genuinely does
-// not reference the generated asset manifest yet and src/server/routes.ts
-// (Task 7) is what wires real asset serving in. A warning nobody re-hardens
-// is exactly how a control like this dies quietly — its failure mode (HTTP
-// 200 serving a blank page, or assets silently dropped by dead-code
-// elimination) does not announce itself — so this stays a hard failure by
-// default and the relaxation must be named explicitly by whoever invokes it.
-// Task 7 is expected to retire the need for this flag entirely.
-const ALLOW_UNWIRED_ASSETS = process.env.ATRIUM_ALLOW_UNWIRED_ASSETS === '1'
-
 function countFiles(dir: string): number {
   let n = 0
   for (const e of readdirSync(dir, { withFileTypes: true })) {
@@ -35,24 +21,13 @@ const expected = countFiles(DIST)
 const parked = `${DIST}.parked`
 renameSync(DIST, parked)
 
-// NOTE (Task 4, measured): src/index.ts's `serve` command is the real server
-// (src/server/serve.ts) — it has no static-asset route yet. Serving the built
-// SPA is src/server/routes.ts's job (Task 7); until that lands, nothing in
-// this entry point's import graph references the generated ASSET_PATHS
-// manifest, so `bun build --compile` drops it via dead-code elimination and
-// the embedded count is genuinely 0, and `GET /` falls through to the bearer
-// check (401) since there is no route for it. The two checks below that
-// depend on that wiring (asset-embed count, GET /) are hard failures UNLESS
-// ATRIUM_ALLOW_UNWIRED_ASSETS=1 is set (see above) — Task 7 is the
-// re-hardening point: once routes.ts actually serves these paths, both checks
-// pass on their own with no script edit needed, opt-out or not.
+// src/server/routes.ts (Task 7) serves the built SPA from the generated
+// ASSET_PATHS manifest, pre-auth, manifest-only. Both checks below are hard
+// failures: a zero (or short) embedded-asset count means DCE dropped the
+// manifest, and a non-200 `GET /` means the route isn't actually wired.
 let failures: string[] = []
-let relaxed: string[] = []
 let embedded = 0
 
-if (ALLOW_UNWIRED_ASSETS) {
-  console.warn('RELAXED: asset embedding + GET / unchecked (no routes.ts yet; Task 7 re-hardens)')
-}
 try {
   const proc = Bun.spawn([BIN, 'serve', '--port', '7373'], { cwd: '/tmp', stdout: 'pipe', stderr: 'pipe' })
 
@@ -82,17 +57,14 @@ try {
   ).json()
   embedded = Number(health.assets)
   if (embedded < expected) {
-    const msg = `embedded ${embedded} < dist ${expected} — DCE dropped assets`
-    if (ALLOW_UNWIRED_ASSETS) relaxed.push(msg); else failures.push(msg)
+    failures.push(`embedded ${embedded} < dist ${expected} — DCE dropped assets`)
   }
 
   // Review finding 4: proves src/core/paths.ts's /$bunfs/ detection end to
   // end, against the real compiled binary — not just the unit-tested pure
   // predicate. The failure mode this guards is silent and severe: a wrong
   // detection produces a systemd ExecStart pointing at a path that does not
-  // exist, and nothing about that fails loudly at install time. This is a
-  // hard failure regardless of ATRIUM_ALLOW_UNWIRED_ASSETS — it has nothing
-  // to do with static asset serving.
+  // exist, and nothing about that fails loudly at install time.
   const execLine = String(health.execLine)
   if (execLine.includes('$bunfs')) failures.push(`execLine contains a $bunfs path: ${execLine}`)
   else if (!execLine.startsWith('/')) failures.push(`execLine is not an absolute path: ${execLine}`)
@@ -100,8 +72,7 @@ try {
 
   const html = await fetch('http://127.0.0.1:7373/')
   if (html.status !== 200) {
-    const msg = `GET / returned ${html.status}`
-    if (ALLOW_UNWIRED_ASSETS) relaxed.push(msg); else failures.push(msg)
+    failures.push(`GET / returned ${html.status}`)
   }
 
   const body = await html.text()
@@ -139,8 +110,6 @@ try {
 } finally {
   if (existsSync(parked)) renameSync(parked, DIST)
 }
-
-for (const r of relaxed) console.warn(`  - ${r}`)
 
 if (failures.length) {
   console.error('PACKAGING ASSERTION FAILED:')
