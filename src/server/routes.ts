@@ -4,6 +4,8 @@ import type { Registry } from '../core/registry'
 export interface RouteCtx {
   registry: Registry
   snapshot(): Record<string, unknown>
+  /** Supplies a `call` action's `cfg` argument. See scheduler.configFor. */
+  configFor(providerId: string): unknown
   headers: Record<string, string>
 }
 
@@ -68,7 +70,9 @@ export async function handleRoute(req: Request, ctx: RouteCtx): Promise<Response
   if (m && req.method === 'POST') {
     const [, providerId, actionId] = m
     try {
-      await dispatch(ctx.registry, providerId!, actionId!, await req.json())
+      await dispatch(ctx.registry, providerId!, actionId!, await req.json(), {
+        cfg: ctx.configFor(providerId!),
+      })
       return Response.json({ ok: true }, { headers: ctx.headers })
     } catch (e) {
       // Unknown provider/action and payload-validation failures are client

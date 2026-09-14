@@ -43,10 +43,16 @@ export interface ServeConfig {
 export async function startServer(cfg: ServeConfig) {
   const auth = createAuth()
   // No providers are registered yet — Plan 2 (git/claude/obsidian/mail) is the
-  // consumer. This is live wiring for /api/state and the action-dispatch
-  // route, not a stub: once a later task calls registry.register(...) before
-  // startServer runs, /api/state and POST /api/actions/:providerId/:actionId
-  // work with no change here.
+  // consumer, and it CANNOT register one without changing this signature:
+  // the registry and the scheduler are both constructed here, reachable by
+  // nothing outside this function, and ServeConfig carries no registry,
+  // providers or config field. What is already live is everything downstream
+  // of them — /api/state and POST /api/actions/:providerId/:actionId serve
+  // whatever this registry holds, and a `call` action's cfg is read straight
+  // out of the scheduler's config — so Plan 2 widens the way the registry
+  // gets FILLED, not the routes. (Final review I5: the comment this replaces
+  // asserted the opposite, that a later task could just call
+  // registry.register(...) before startServer with no change here.)
   const registry = createRegistry()
   const scheduler = createScheduler(registry, { config: {} })
   const nonce = crypto.randomUUID()
@@ -102,7 +108,12 @@ export async function startServer(cfg: ServeConfig) {
           return new Response('unauthorized', { status: 401, headers })
         }
 
-        return handleRoute(req, { registry, snapshot: scheduler.snapshot, headers })
+        return handleRoute(req, {
+          registry,
+          snapshot: scheduler.snapshot,
+          configFor: scheduler.configFor,
+          headers,
+        })
       },
 
       websocket: {

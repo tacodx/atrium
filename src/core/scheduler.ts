@@ -52,6 +52,16 @@ export function createScheduler(registry: Registry, opts: { config: Record<strin
     onUpdate: (fn: (id: string, data: unknown) => void) => { listeners.add(fn); return () => listeners.delete(fn) },
     snapshot: () => Object.fromEntries(last),
 
+    /**
+     * The one config holder in the system, so it is also the one place the
+     * action layer can get a provider's config from. `fetch` already receives
+     * `opts.config[providerId]`; before this existed, `dispatch` had no path
+     * to the same value and passed `undefined` to every `call` action's
+     * `run(target, cfg)` — unimplementable for all four `call` actions the
+     * spec plans. Same lookup, same value, one accessor.
+     */
+    configFor: (providerId: string): unknown => opts.config[providerId],
+
     start() {
       // A defensive double-start is a plausible caller mistake, not a
       // programming error worth crashing on — but a second pass through the

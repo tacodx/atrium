@@ -14,8 +14,12 @@ const stubProvider = (id: string, actions: Provider<any, any>['actions']): Provi
   actions,
 })
 
-function ctx(registry = createRegistry(), snapshot: () => Record<string, unknown> = () => ({})) {
-  return { registry, snapshot, headers: HEADERS }
+function ctx(
+  registry = createRegistry(),
+  snapshot: () => Record<string, unknown> = () => ({}),
+  config: Record<string, unknown> = {},
+) {
+  return { registry, snapshot, configFor: (id: string) => config[id], headers: HEADERS }
 }
 
 test('GET /api/state returns the scheduler snapshot as JSON, with the standard headers', async () => {
@@ -65,6 +69,25 @@ test('the route is namespaced by provider id — two providers may each declare 
   expect(await res.json()).toEqual({ ok: true })
   expect(openedA).toBe(false)
   expect(openedB).toBe(true)
+})
+
+// Final review I4, at the route level: the action route is the only thing that
+// ever calls dispatch in production, so "a call action gets its config" is only
+// true if the config reaches it from HERE. RouteCtx.configFor is what carries
+// it; serve.ts fills that in from the scheduler, the one config holder.
+test('the action route hands a call action its own provider config', async () => {
+  const registry = createRegistry()
+  let seen: unknown
+  registry.register(stubProvider('obsidian', [{
+    kind: 'call', id: 'capture', label: 'Capture', run: async (_t, cfg) => { seen = cfg },
+  }]))
+
+  const res = await handleRoute(
+    new Request('http://x/api/actions/obsidian/capture', { method: 'POST', body: '{"text":"note"}' }),
+    ctx(registry, () => ({}), { obsidian: { vault: '/home/u/vault' }, git: { roots: [] } }),
+  )
+  expect(res.status).toBe(200)
+  expect(seen).toEqual({ vault: '/home/u/vault' })   // its own, not another provider's
 })
 
 // Deliberately independent of whether `bun run build:web && bun run

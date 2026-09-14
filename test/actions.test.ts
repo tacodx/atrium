@@ -1,7 +1,10 @@
-import { test, expect, describe } from 'bun:test'
+import { test, expect, describe, afterAll } from 'bun:test'
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { createRegistry } from '../src/core/registry'
-import { dispatch, buildArgv } from '../src/core/actions'
-import type { Provider } from '../src/core/contract'
+import { dispatch, buildArgv, spawnDetached } from '../src/core/actions'
+import type { Action, Provider } from '../src/core/contract'
 
 const provider = (actions: Provider<any, any>['actions']): Provider<any, any> => ({
   id: 'git',
@@ -12,33 +15,115 @@ const provider = (actions: Provider<any, any>['actions']): Provider<any, any> =>
   actions,
 })
 
+const exec = (argv: (t: any) => { cmd: string; args: string[] }): Action =>
+  ({ kind: 'exec', id: 'open', label: 'Open', argv })
+
+// --- real-process fixtures -------------------------------------------------
+//
+// The final whole-branch review found three defects in this module and traced
+// all three to the same cause: nothing in the suite had ever exercised
+// spawnDetached or dispatch's exec branch, so every one of them failed
+// silently through seven task reviews. These fixtures spawn REAL processes —
+// a fake launcher standing in for systemd-run (so no user bus is required and
+// both of its branches are reachable) and a payload script that records what
+// it was actually given.
+
+const SANDBOXES: string[] = []
+
+function sandbox(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'atrium-exec-'))
+  SANDBOXES.push(dir)
+  return dir
+}
+
+afterAll(() => { for (const dir of SANDBOXES) rmSync(dir, { recursive: true, force: true }) })
+
+function script(dir: string, name: string, body: string): string {
+  const path = join(dir, name)
+  writeFileSync(path, `#!/bin/sh\n${body}\n`, { mode: 0o755 })
+  return path
+}
+
+/** Strips systemd-run's own options up to `--` and execs the rest, exactly as
+ *  `systemd-run --scope` does — minus the scope and the bus. */
+const PASSTHROUGH = 'while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done\nshift\nexec "$@"'
+
+async function waitFor(path: string, ms = 10_000): Promise<boolean> {
+  const deadline = Date.now() + ms
+  while (Date.now() < deadline) {
+    if (existsSync(path)) return true
+    await Bun.sleep(20)
+  }
+  return existsSync(path)
+}
+
 describe('argv invariant', () => {
   test('every exec action yields an argv array, never a string', () => {
-    const p = provider([{
-      kind: 'exec', id: 'open', label: 'Open',
-      argv: (t: any) => ({ cmd: '/usr/bin/xdg-open', args: [t.path] }),
-    }])
-    const out = buildArgv(p.actions[0], { path: '/home/u/repo' })
+    const out = buildArgv(exec((t: any) => ({ cmd: '/usr/bin/xdg-open', args: [t.path] })), { path: '/home/u/repo' })
     expect(Array.isArray(out.args)).toBe(true)
-    expect(out.cmd).not.toContain(' ')
-  })
-
-  test('a path beginning with a dash is passed as an absolute path, not a flag', () => {
-    const p = provider([{
-      kind: 'exec', id: 'open', label: 'Open',
-      argv: (t: any) => ({ cmd: '/usr/bin/xdg-open', args: [t.path] }),
-    }])
-    const out = buildArgv(p.actions[0], { path: '/tmp/-rf' })
-    expect(out.args[0].startsWith('/')).toBe(true)
+    expect(out.args).toEqual(['/home/u/repo'])
   })
 
   test('a shell metacharacter in a target is inert because there is no shell', () => {
-    const p = provider([{
-      kind: 'exec', id: 'open', label: 'Open',
-      argv: (t: any) => ({ cmd: '/bin/echo', args: [t.path] }),
-    }])
-    const out = buildArgv(p.actions[0], { path: '/tmp/foo; rm -rf ~' })
+    const out = buildArgv(exec((t: any) => ({ cmd: '/bin/echo', args: [t.path] })), { path: '/tmp/foo; rm -rf ~' })
     expect(out.args).toEqual(['/tmp/foo; rm -rf ~'])   // one argument, not three
+  })
+
+  // Final review I2. buildArgv used to resolve() every dash-leading argument,
+  // which turned spec §8.8's own editor example into
+  // ['<cwd>/--wait', '/home/u/repo/NOTE.md'] with no error and no log.
+  test('a literal flag an action declares survives verbatim — spec §8.8\'s `code --wait <file>`', () => {
+    const out = buildArgv(exec((t: any) => ({ cmd: '/usr/bin/code', args: ['--wait', t.path] })), { path: '/home/u/repo/NOTE.md' })
+    expect(out.args).toEqual(['--wait', '/home/u/repo/NOTE.md'])
+  })
+
+  test('a subcommand\'s own flags survive verbatim, `--` included', () => {
+    const out = buildArgv(exec((t: any) => ({ cmd: '/usr/bin/tig', args: ['diff', '--stat', '--', t.path] })), { path: '/repo/x' })
+    expect(out.args).toEqual(['diff', '--stat', '--', '/repo/x'])
+  })
+
+  // Replaces a test that passed '/tmp/-rf' — absolute, so the branch it meant
+  // to exercise was never entered and it asserted the input unchanged.
+  test('a dash-leading positional is passed through; `--` is the action author\'s guard', () => {
+    const out = buildArgv(exec((t: any) => ({ cmd: '/usr/bin/xdg-open', args: ['--', t.path] })), { path: '-rf' })
+    expect(out.args).toEqual(['--', '-rf'])
+  })
+
+  test('a non-string argument is rejected rather than passed to the spawn', () => {
+    expect(() => buildArgv(exec(() => ({ cmd: '/bin/echo', args: [42 as unknown as string] })), {}))
+      .toThrow(/non-string argument/i)
+  })
+})
+
+// Final review I3: an exec action is the ONE component §8.6's hardening does
+// not cover — no -c prefix, no env allowlist, the full process.env — so a
+// provider declaring { cmd: 'git', args: ['-C', path, 'diff'] } would have run
+// git on a hostile repo with core.fsmonitor live. The tripwire in
+// rungit.test.ts is the static half of this; these are the runtime half, and
+// they also catch a command name assembled at run time, which no scan can see.
+describe('the git chokepoint reaches the action layer', () => {
+  test('an exec action naming the git binary is rejected, in every spelling', () => {
+    for (const cmd of ['git', '/usr/bin/git', '/nix/store/abc-git-2.55.0/bin/git', './git', 'GIT']) {
+      expect(() => buildArgv(exec(() => ({ cmd, args: ['-C', '/repo', 'diff'] })), {}))
+        .toThrow(/runGit/)
+    }
+  })
+
+  test('a name assembled at run time is caught too — the static tripwire cannot see this', () => {
+    const assembled = ['gi', 't'].join('')
+    expect(() => buildArgv(exec(() => ({ cmd: assembled, args: ['status'] })), {})).toThrow(/runGit/)
+  })
+
+  test('lookalike binaries are left alone', () => {
+    for (const cmd of ['/usr/bin/gitk', '/usr/bin/git-crypt', '/usr/bin/legit', '/usr/bin/digit']) {
+      expect(buildArgv(exec(() => ({ cmd, args: [] })), {}).cmd).toBe(cmd)
+    }
+  })
+
+  test('dispatch refuses the exec action rather than spawning it', async () => {
+    const r = createRegistry()
+    r.register(provider([{ kind: 'exec', id: 'diff', label: 'Diff', argv: () => ({ cmd: 'git', args: ['diff'] }) }]))
+    await expect(dispatch(r, 'git', 'diff', {}, { cfg: {} })).rejects.toThrow(/runGit/)
   })
 })
 
@@ -46,13 +131,13 @@ describe('dispatch', () => {
   test('rejects an unknown action id rather than dispatching dynamically', async () => {
     const r = createRegistry()
     r.register(provider([]))
-    await expect(dispatch(r, 'git', 'nonexistent', {})).rejects.toThrow(/unknown action/i)
+    await expect(dispatch(r, 'git', 'nonexistent', {}, { cfg: {} })).rejects.toThrow(/unknown action/i)
   })
 
   test('rejects an unknown provider id', async () => {
     const r = createRegistry()
     r.register(provider([]))
-    await expect(dispatch(r, 'nope', 'open', {})).rejects.toThrow(/unknown provider/i)
+    await expect(dispatch(r, 'nope', 'open', {}, { cfg: {} })).rejects.toThrow(/unknown provider/i)
   })
 
   test('a call action validates its payload at the boundary', async () => {
@@ -62,7 +147,102 @@ describe('dispatch', () => {
       payloadSchema: { parse: (x: any) => { if (typeof x?.text !== 'string') throw new Error('bad payload'); return x } },
       run: async () => {},
     }]))
-    await expect(dispatch(r, 'git', 'capture', { text: 123 })).rejects.toThrow(/bad payload/)
-    await expect(dispatch(r, 'git', 'capture', { text: 'ok' })).resolves.toBeUndefined()
+    await expect(dispatch(r, 'git', 'capture', { text: 123 }, { cfg: {} })).rejects.toThrow(/bad payload/)
+    await expect(dispatch(r, 'git', 'capture', { text: 'ok' }, { cfg: {} })).resolves.toBeUndefined()
+  })
+
+  // Final review I4: run()'s cfg was hardcoded undefined, which makes all four
+  // `call` actions the spec plans (obsidian's daily note + quick-capture,
+  // mail's mark-read + archive) unimplementable — every one of them needs a
+  // vault path, a template, or an account out of config.
+  test('a call action receives its provider config, not undefined', async () => {
+    const r = createRegistry()
+    const seen: unknown[] = []
+    r.register(provider([{
+      kind: 'call', id: 'capture', label: 'Capture',
+      run: async (_target, cfg) => { seen.push(cfg) },
+    }]))
+    await dispatch(r, 'git', 'capture', { text: 'x' }, { cfg: { vault: '/home/u/vault', daily: 'journal/%Y-%m-%d.md' } })
+    expect(seen).toEqual([{ vault: '/home/u/vault', daily: 'journal/%Y-%m-%d.md' }])
+  })
+
+  test('a call action still receives its target, and the two are not confused', async () => {
+    const r = createRegistry()
+    let target: unknown
+    let cfg: unknown
+    r.register(provider([{
+      kind: 'call', id: 'capture', label: 'Capture',
+      run: async (t, c) => { target = t; cfg = c },
+    }]))
+    await dispatch(r, 'git', 'capture', { text: 'note' }, { cfg: { vault: '/v' } })
+    expect(target).toEqual({ text: 'note' })
+    expect(cfg).toEqual({ vault: '/v' })
+  })
+})
+
+// --- exec branch, end to end against real processes ------------------------
+
+describe('the exec branch actually launches things', () => {
+  test('dispatch launches the declared argv, flags intact, through the launcher', async () => {
+    const dir = sandbox()
+    const marker = join(dir, 'ran')
+    const argvLog = join(dir, 'argv')
+    const launcher = script(dir, 'launcher', PASSTHROUGH)
+    const payload = script(dir, 'payload', `printf '%s\\n' "$@" > ${argvLog}\n: > ${marker}`)
+
+    const r = createRegistry()
+    r.register(provider([{
+      kind: 'exec', id: 'open', label: 'Open',
+      argv: (t: any) => ({ cmd: payload, args: ['--wait', '--', t.path] }),
+    }]))
+    await dispatch(r, 'git', 'open', { path: '/home/u/repo/NOTE.md' }, { cfg: {}, launcher })
+
+    expect(await waitFor(marker)).toBe(true)
+    expect(readFileSync(argvLog, 'utf8').split('\n').filter(Boolean))
+      .toEqual(['--wait', '--', '/home/u/repo/NOTE.md'])
+  })
+
+  // Final review I1(a). execFile's default 1 MiB maxBuffer does not truncate —
+  // it KILLS the child. §7.1's own example is a terminal running `claude`.
+  test('a child writing far more than 1 MiB runs to completion instead of being killed', async () => {
+    const dir = sandbox()
+    const finished = join(dir, 'finished')
+    const launcher = script(dir, 'launcher', PASSTHROUGH)
+    const payload = script(dir, 'payload', `dd if=/dev/zero bs=65536 count=64 2>/dev/null | tr '\\0' 'x'\n: > ${finished}`)
+
+    spawnDetached(payload, [], { launcher })
+    expect(await waitFor(finished, 20_000)).toBe(true)
+  })
+
+  // Final review I1(b). `systemd-run --scope` is synchronous and forwards the
+  // child's own exit status, so keying the fallback on a non-zero exit relaunched
+  // every editor that exited non-zero a second time — bare and unscoped, which
+  // is exactly what §9 mandates the scope to prevent.
+  test('a launcher exiting non-zero does NOT relaunch the command unscoped', async () => {
+    const dir = sandbox()
+    const launcherRan = join(dir, 'launcher-ran')
+    const cmdRan = join(dir, 'cmd-ran')
+    const launcher = script(dir, 'launcher', `: > ${launcherRan}\nexit 1`)
+    const payload = script(dir, 'payload', `: > ${cmdRan}`)
+
+    spawnDetached(payload, [], { launcher })
+    expect(await waitFor(launcherRan)).toBe(true)   // the launcher ran and has already exited 1
+    await Bun.sleep(500)                            // ample slack: the fallback spawn was immediate
+    expect(existsSync(cmdRan)).toBe(false)
+  })
+
+  test('a launcher that cannot start at all DOES fall back to a bare spawn', async () => {
+    const dir = sandbox()
+    const cmdRan = join(dir, 'cmd-ran')
+    const payload = script(dir, 'payload', `: > ${cmdRan}`)
+
+    spawnDetached(payload, [], { launcher: join(dir, 'no-such-systemd-run') })
+    expect(await waitFor(cmdRan)).toBe(true)
+  })
+
+  test('neither spawn failing throws into the caller', () => {
+    const dir = sandbox()
+    expect(() => spawnDetached(join(dir, 'no-such-command'), [], { launcher: join(dir, 'no-such-launcher') }))
+      .not.toThrow()
   })
 })

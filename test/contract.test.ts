@@ -60,6 +60,28 @@ describe('scheduler', () => {
     expect(seen).toEqual(['discovery', 'metadata'])
   })
 
+  // Final review I4: fetch has always received opts.config[providerId]; the
+  // action layer had no path to the same value and handed every `call` action
+  // `undefined`. configFor is that path — same map, same lookup, so a provider
+  // cannot see one config in fetch() and a different one in an action.
+  test('exposes the same per-provider config the fetch side receives', async () => {
+    const r = createRegistry()
+    let sawInFetch: unknown
+    r.register(stub('obsidian', {
+      schedules: [{ name: 'poll', intervalMs: 1000, runOnStart: false }],
+      fetch: async (cfg) => { sawInFetch = cfg; return {} },
+    }))
+
+    const config = { obsidian: { vault: '/home/u/vault' }, git: { roots: ['/src'] } }
+    const s = createScheduler(r, { config })
+    await s.runNow('obsidian', 'poll')
+
+    expect(s.configFor('obsidian')).toEqual({ vault: '/home/u/vault' })
+    expect(s.configFor('obsidian')).toBe(sawInFetch)
+    expect(s.configFor('git')).toEqual({ roots: ['/src'] })
+    expect(s.configFor('absent')).toBeUndefined()
+  })
+
   test('passes the previous result so a metadata pass can read the discovery list', async () => {
     const r = createRegistry()
     let sawPrevious: unknown = 'unset'
