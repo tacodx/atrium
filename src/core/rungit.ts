@@ -193,14 +193,32 @@ export function gitEnvFor(gitBin: string): NodeJS.ProcessEnv {
  * probe reads as "not ignored", falls through to the ambiguous row, and the
  * repo is silently dropped from the dashboard instead of being retried.
  *
- * The derivation reads `killed`, NOT `signal`. `killed` is true only when this
- * process called kill(), and the timeout option below is the only thing here
- * that does. A child killed by an EXTERNAL signal — the OOM killer, a SIGSEGV
- * — reports `killed: false` with `signal` set (measured: a self-SIGKILL gives
+ * The derivation reads `killed`, NOT `signal`. The claim is narrow and
+ * measured, so state it narrowly: ON BUN 1.3.11 the timeout is the only path
+ * here that surfaces as `killed === true`. It is NOT the only thing that
+ * terminates the child — the maxBuffer option at the same call site below,
+ * one line after the timeout, does so as well — but on
+ * this version an overflow reports `killed: undefined` with
+ * `code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'`, so it does not read as a
+ * timeout. That is a measured runtime behaviour, not a property of the API:
+ * Node's own execFile assigns `ex.killed = child.killed || killed` after a
+ * maxBuffer kill, which WOULD report true.
+ *
+ * A child killed by an EXTERNAL signal — the OOM killer, a SIGSEGV — reports
+ * `killed: false` with `signal` set (measured: a self-SIGKILL gives
  * `code: null`, `killed: false`, `signal: SIGKILL`), and that is a crash, not
- * a timeout; deriving from `signal` instead would mislabel it. TRIPWIRE: if an
- * AbortSignal is ever added to the execFile options below, `killed` becomes
- * true on abort as well, and this derivation must be revisited.
+ * a timeout; deriving from `signal` instead would mislabel it. That is pinned
+ * by the crash case in test/rungit.test.ts, which also kills the two other
+ * derivations that agree with this one on timeout-and-miss alone.
+ *
+ * TWO TRIPWIRES, both of which would make a non-timeout report as a timeout
+ * and be retried forever by the per-repo backoff built on this field:
+ *   1. If an AbortSignal is ever added to the execFile options below, `killed`
+ *      becomes true on abort as well, and this derivation must be revisited.
+ *   2. If a bun upgrade brings maxBuffer's `killed` reporting into line with
+ *      Node's, a repo whose output overflows 16MB would be reported as timed
+ *      out on every single run. Nothing covers that case: the overflow shape
+ *      is recorded in ADR 0002 as a measured fact, not asserted by a test.
  */
 export interface GitResult { stdout: string; stderr: string; code: number | string; timedOut: boolean }
 

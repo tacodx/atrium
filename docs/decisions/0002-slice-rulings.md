@@ -170,9 +170,11 @@ alongside them.
 (`src/core/scheduler.ts:25`), and in the `configFor` accessor that `dispatch` reads through
 (`src/core/scheduler.ts:63`). Both are the same lookup of the same value, keyed on the provider id.
 
-The consequence is that with `id: 'repos'`, a key written `git.staleDays` resolves to `undefined` — and every
-consumer of it is written `?? 30`, so the wrong spelling is **swallowed in silence**. Nothing throws, nothing
-logs, and the dashboard's "needs attention" grouping quietly uses the default forever. This is the defect the
+The consequence is that with `id: 'repos'`, a key written `git.staleDays` would resolve to `undefined` — and
+since the spec gives it a default of 30, any `?? 30` fallback written against it **would swallow the wrong
+spelling in silence**. Nothing would throw, nothing would log, and the dashboard's "needs attention" grouping
+would quietly use the default forever. (Conditional on purpose: no consumer of this key exists at HEAD. T8 writes
+the first ones, which is why this is a ruling recorded before the code rather than a bug report after it.) This is the defect the
 Plan 2 scoping pass named: *a provider renamed in one task whose config keys stay unrenamed in another.*
 
 (Deliberately not quoted here: the current expression at either line. Task 3 moves the config parse inside
@@ -204,7 +206,10 @@ content-security-policy: default-src 'self'; connect-src 'self' ws://127.0.0.1:$
 ### Property 1 — there is no `style-src` directive and no `'unsafe-inline'`
 
 Inline styles therefore fall back to `default-src 'self'` and are **dropped by the browser**. There is no
-server-side error, no log line, and no failed request: the element simply renders unstyled.
+server-side error, no server-side log line, and no failed request: the element simply renders unstyled. The
+browser itself *does* report it — a console CSP-violation message and a `securitypolicyviolation` event on the
+document — and that console message is the one place that names the cause, so it is where an author debugging an
+unstyled pane should look first.
 
 ### Property 2 — the packaging gate can never observe a CSP violation
 
@@ -229,8 +234,8 @@ point.
 
 ## Measured — the `timedOut` channel
 
-`GitResult` gains a required `timedOut: boolean` (`src/core/rungit.ts:205`), derived at the single construction
-site (`src/core/rungit.ts:221`). This section is why.
+`GitResult` gains a required `timedOut: boolean` (`src/core/rungit.ts:223`), derived at the single construction
+site (`src/core/rungit.ts:239`). This section is why.
 
 ### The four execFile shapes
 
@@ -255,18 +260,26 @@ A timed-out `runGit` is **indistinguishable from a real exit 1 on `code` alone**
 
 That matters because of §7.1's classifier. Measured through `runGit` against a `makeRepo()` fixture:
 `git check-ignore -q -- <path>` exits **1** on a miss and **0** on a hit. §7.1's container row surfaces a child
-only on exit **0**. So a timed-out probe reads as "not ignored", falls through to the ambiguous row — which is
-"drop, overridable by `repos.treatAsContainer`" (spec line 156) — and **the repo silently disappears from the
-dashboard instead of being retried.** A transient slow disk becomes a missing project, with no error anywhere.
+only on exit **0**. So a timed-out probe reads as "not ignored", falls through to the ambiguous row — which spec
+line 156 states as "drop, overridable by `git.treatAsContainer`", rendered `repos.treatAsContainer` under Ruling C
+— and **the repo silently disappears from the dashboard instead of being retried.** A transient slow disk becomes a missing project, with no error anywhere.
 
 ### Why the derivation reads `killed` and not `signal`
 
 `timedOut` is `err?.killed === true`, and nothing else.
 
-`killed` is `true` only when **this** process called `kill()`, and `execFile`'s `timeout` option is the only thing
-in `runGit` that does so. A child killed by an **external** signal — the OOM killer, a SIGSEGV — reports
-`killed: false` with `signal` set (row 6 above), and must not be called a timeout: it is a crash, and a retry
-policy that treats it as a timeout will retry a process that will die the same way again.
+The claim this rests on is narrow, so it is stated narrowly: **on bun 1.3.11, the timeout is the only path in
+`runGit` that surfaces as `killed === true`.** It is *not* the only thing that terminates the child —
+`maxBuffer: 16 * 1024 * 1024` is set on the line immediately after the timeout at the same call site
+(`src/core/rungit.ts:234-235`) and also kills it, which is
+documented behaviour and not an edge case — but on this version an overflow reports `killed: undefined` (row 5
+above), so it does not read as a timeout. The derivation is therefore correct here **by measured runtime
+behaviour, not by the API's guarantee**: Node's own `execFile` assigns `ex.killed = child.killed || killed` after a
+maxBuffer kill, which would report `true`. See tripwire 2 below.
+
+A child killed by an **external** signal — the OOM killer, a SIGSEGV — reports `killed: false` with `signal` set
+(row 6 above), and must not be called a timeout: it is a crash, and a retry policy that treats it as a timeout
+will retry a process that will die the same way again.
 
 **This is pinned by a test, not merely by review.** It did not start that way. A timeout-and-miss pair constrains
 `timedOut` only as "true on a timeout, false on a plain exit 1", and every wrong derivation in the obvious family
@@ -281,7 +294,15 @@ of them.
 
 ### Tripwire on the derivation
 
-**If an `AbortSignal` is ever added to `runGit`'s `execFile` options, `killed` becomes `true` on abort too, and
-this derivation must be revisited.** A caller-initiated cancellation would then be reported as a timeout and
-retried. The same warning is in the doc comment at `src/core/rungit.ts:196-203`, where an author adding the option
-will actually be looking.
+Two, both with the same shape: a non-timeout starts reporting as a timeout, and T8's per-repo backoff retries
+forever something that will fail identically every run.
+
+1. **If an `AbortSignal` is ever added to `runGit`'s `execFile` options, `killed` becomes `true` on abort too, and
+   this derivation must be revisited.** A caller-initiated cancellation would then be reported as a timeout.
+2. **If a bun upgrade brings `maxBuffer`'s `killed` reporting into line with Node's, a repo whose output overflows
+   16MB would report as timed out on every run.** This one is uncovered: the brief ruled out a `maxBuffer` test on
+   flakiness grounds, so the overflow shape is recorded here as a measured fact (row 5) and asserted by nothing. A
+   bun-version bump should re-measure row 5 before anything else in this table.
+
+Both warnings are in the doc comment at `src/core/rungit.ts:196-222`, where an author changing these options will
+actually be looking.
