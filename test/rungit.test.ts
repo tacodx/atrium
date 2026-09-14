@@ -1,8 +1,9 @@
 import { test, expect } from 'bun:test'
-import { readFileSync, readdirSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { readFileSync, readdirSync, statSync, existsSync, mkdtempSync, writeFileSync, symlinkSync } from 'node:fs'
+import { join, dirname } from 'node:path'
+import { tmpdir } from 'node:os'
 import { makeRepo, makeMaliciousRepo, makeSingleVectorRepo, wasPwned } from './fixtures/gitrepo'
-import { runGit } from '../src/core/rungit'
+import { runGit, resolveGit, gitEnvFor, emptyHooksDir } from '../src/core/rungit'
 
 test('a hostile repo cannot execute anything through status, diff, or log — and diff still works', async () => {
   const { dir, marker } = makeMaliciousRepo()
@@ -92,6 +93,94 @@ test('vector: a bare .git/hooks/post-index-change fires with zero config entries
   const { code } = await runGit(dir, ['status', '--porcelain=v2', '--branch'])
   expect(code).toBe(0)
   expect(wasPwned(marker)).toBe(false)
+})
+
+// --- What runGit actually hands the binary ---------------------------------
+//
+// Final review I8 + I9. Both are one-line changes, and both were invisible to
+// every prior test because nothing ever looked at the argv or the env runGit
+// builds — the suite only ever observed git's OUTPUT. This installs a
+// recording wrapper named `git` in a scratch directory, points the ambient
+// PATH at it, and reads back exactly what the child was given. It is also the
+// off-FHS case in miniature: the wrapper is the only git on PATH and it lives
+// nowhere near /usr/bin.
+
+test('runs the git it resolved from PATH, with --no-optional-locks before the subcommand', async () => {
+  const realGit = resolveGit()                       // capture before shadowing PATH
+  const repo = makeRepo()                            // build the fixture with the real one
+  const dir = mkdtempSync(join(tmpdir(), 'atrium-fakegit-'))
+  const log = join(dir, 'argv')
+  writeFileSync(
+    join(dir, 'git'),
+    `#!/bin/sh\nprintf '%s\\n' "$@" > ${log}\nprintf 'PATH=%s\\n' "$PATH" >> ${log}\nexec ${realGit} "$@"\n`,
+    { mode: 0o755 },
+  )
+
+  const saved = process.env.PATH
+  process.env.PATH = dir
+  try {
+    const { code, stdout } = await runGit(repo, ['status', '--porcelain=v2', '--branch'])
+    expect(code).toBe(0)
+    expect(stdout).toContain('# branch.head main')   // the wrapper really did exec git
+  } finally {
+    process.env.PATH = saved
+  }
+
+  const recorded = readFileSync(log, 'utf8').split('\n')
+
+  // I9: spec §7.1 mandates it, and a caller cannot supply it — args[0] is the
+  // subcommand, and post-subcommand it is exit 129 (measured, git 2.55.0).
+  expect(recorded).toContain('--no-optional-locks')
+  expect(recorded.indexOf('--no-optional-locks')).toBeLessThan(recorded.indexOf('status'))
+
+  // I8: the child's PATH is derived from the binary actually found, not from
+  // a hardcoded /usr/bin:/bin that does not exist on NixOS and hides brew,
+  // MacPorts and any user-local git.
+  expect(recorded).toContain(`PATH=${dir}`)
+})
+
+test('gitEnvFor stays a from-scratch allowlist, with PATH derived from the binary', () => {
+  const env = gitEnvFor('/nix/store/1a2b3c-git-2.55.0/bin/git')
+  expect(env.PATH).toBe('/nix/store/1a2b3c-git-2.55.0/bin')
+  expect(env.GIT_CONFIG_GLOBAL).toBe('/dev/null')    // §8.6: SET, never merely scrubbed
+  expect(env.GIT_CONFIG_SYSTEM).toBe('/dev/null')
+  expect(env.LANG).toBe('C')
+  // The allowlist is the control: anything not named above must be absent.
+  expect(Object.keys(env).sort()).toEqual(['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'HOME', 'LANG', 'PATH'])
+})
+
+test('resolveGit searches the PATH it is given, not a fixed FHS location', () => {
+  const realGit = resolveGit()
+  const dir = mkdtempSync(join(tmpdir(), 'atrium-whichgit-'))
+  symlinkSync(realGit, join(dir, 'git'))
+  expect(resolveGit(dir)).toBe(join(dir, 'git'))
+  expect(dirname(resolveGit(dir))).not.toBe('/usr/bin')
+})
+
+// Final review M3: mkdtempSync at module import left one
+// /tmp/atrium-nohooks-XXXXXX behind per process start — 74 had accumulated on
+// the author's machine — and created one even when git was never called. Two
+// real child processes, because "stable across process starts" is not a claim
+// a single process can make about itself.
+test('the hook-free directory is one stable per-user path, not one per process start', () => {
+  const script = join(mkdtempSync(join(tmpdir(), 'atrium-hooksdir-')), 'probe.ts')
+  writeFileSync(script, `import { emptyHooksDir } from '${join(process.cwd(), 'src/core/rungit.ts')}'\nconsole.log(emptyHooksDir())\n`)
+  const probe = () => {
+    const r = Bun.spawnSync([process.execPath, 'run', script])
+    return new TextDecoder().decode(r.stdout).trim()
+  }
+
+  const first = probe()
+  const second = probe()
+  expect(first).toBe(second)
+  expect(existsSync(first)).toBe(true)
+  expect(readdirSync(first)).toEqual([])             // still hook-free
+})
+
+test('the hook-free directory is 0700 and owned by us', () => {
+  const st = statSync(emptyHooksDir())
+  expect(st.mode & 0o022).toBe(0)                    // not group- or other-writable
+  if (typeof process.getuid === 'function') expect(st.uid).toBe(process.getuid())
 })
 
 /**

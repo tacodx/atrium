@@ -1,11 +1,74 @@
 import { execFile } from 'node:child_process'
-import { resolve, join } from 'node:path'
-import { mkdtempSync } from 'node:fs'
+import { resolve, join, dirname } from 'node:path'
+import { mkdirSync, mkdtempSync, lstatSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 
-// An empty directory Atrium owns. Pointing core.hooksPath here is stronger than
-// /dev/null: git treats it as a real but hook-free directory.
-const EMPTY_HOOKS = mkdtempSync(join(tmpdir(), 'atrium-nohooks-'))
+/**
+ * An empty directory Atrium owns. Pointing core.hooksPath here is stronger
+ * than /dev/null: git treats it as a real but hook-free directory.
+ *
+ * Created LAZILY, at a STABLE per-user path. The first version called
+ * mkdtempSync at module import, which meant one /tmp/atrium-nohooks-XXXXXX per
+ * process start whether or not git was ever run — 74 of them had accumulated
+ * on the author's machine from test runs alone by the final review. mkdirSync
+ * is idempotent, so calling this per invocation also self-heals the directory
+ * if systemd-tmpfiles removes it under a long-running user service.
+ *
+ * $XDG_RUNTIME_DIR is preferred because it is already 0700 and per-user, so a
+ * predictable name inside it cannot be pre-created by anyone else. A stable
+ * name directly under a world-writable /tmp can be, which would hand another
+ * local user the hooks directory git is pointed at — the very vector this
+ * exists to close — so the /tmp form is uid-suffixed AND verified (owned by
+ * us, not group/other-writable, not a symlink), reverting to an unpredictable
+ * mkdtemp name if that verification does not hold.
+ */
+let hooksDir: string | undefined
+
+function stableHooksDir(env: NodeJS.ProcessEnv = process.env): string {
+  if (env.XDG_RUNTIME_DIR) return join(env.XDG_RUNTIME_DIR, 'atrium', 'nohooks')
+  const uid = typeof process.getuid === 'function' ? process.getuid() : 'unknown'
+  return join(tmpdir(), `atrium-nohooks-${uid}`)
+}
+
+export function emptyHooksDir(): string {
+  const candidate = hooksDir ?? stableHooksDir()
+  try {
+    mkdirSync(candidate, { recursive: true, mode: 0o700 })
+    // mkdirSync's `mode` applies only when it actually creates the directory,
+    // so an already-existing one keeps whatever mode and owner it had. Check.
+    const st = lstatSync(candidate)
+    const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
+    const ours = st.isDirectory() && (uid === undefined || st.uid === uid) && (st.mode & 0o022) === 0
+    if (!ours) throw new Error(`refusing to use a hooks directory we do not exclusively own: ${candidate}`)
+    hooksDir = candidate
+  } catch {
+    hooksDir = mkdtempSync(join(tmpdir(), 'atrium-nohooks-'))
+  }
+  return hooksDir
+}
+
+/**
+ * The git binary, resolved from the AMBIENT PATH — never assumed to sit at a
+ * fixed location. The child's own env is a from-scratch allowlist (see
+ * gitEnvFor), and that allowlist used to hardcode PATH=/usr/bin:/bin: on NixOS
+ * /usr/bin does not exist, so every git call returned code 'ENOENT', and
+ * Homebrew, MacPorts and any user-local git were invisible. For a project that
+ * will be open-sourced, nothing may be hardcoded to one machine's layout.
+ *
+ * Resolved per call rather than once at import: it is a handful of stat calls
+ * against the cost of spawning git, it keeps this module free of import-time
+ * side effects, and it is what lets the test suite point runGit at a recording
+ * wrapper by setting PATH — which is how the argv this file builds is asserted
+ * at all.
+ */
+const FHS_GIT = '/usr/bin/git'
+
+export function resolveGit(searchPath: string | undefined = process.env.PATH): string {
+  // Last resort only when the binary is not on PATH at all: an absolute path
+  // that is about to fail with a real, inspectable ENOENT rather than a bare
+  // name resolved against an env we deliberately do not carry.
+  return Bun.which('git', searchPath === undefined ? undefined : { PATH: searchPath }) ?? FHS_GIT
+}
 
 /**
  * Command-line -c beats repo-local config. This is NOT a blocklist of dangerous
@@ -14,23 +77,34 @@ const EMPTY_HOOKS = mkdtempSync(join(tmpdir(), 'atrium-nohooks-'))
  * It is a fixed set of settings that git would otherwise read from an
  * attacker-controlled .git/config AND RUN THROUGH A SHELL. Spec §8.6.
  */
-const HARDENING = [
-  '--no-pager',
-  '-c', 'core.fsmonitor=',
-  '-c', `core.hooksPath=${EMPTY_HOOKS}`,
-  '-c', 'core.sshCommand=',
-  '-c', 'core.askPass=',
-  '-c', 'core.editor=false',
-  '-c', 'core.pager=cat',
-  '-c', 'protocol.ext.allow=never',
-  // deliberately NOT '-c diff.external=' — see the comment on
-  // DIFF_PRODUCING_SUBCOMMANDS just below for why that looked right and was wrong.
-]
+function hardening(): string[] {
+  return [
+    '--no-pager',
+    // Spec §7.1 mandates this on the git provider's very first metadata call.
+    // It is a PRE-subcommand global option: `git -C <repo> status
+    // --no-optional-locks` exits 129, "unknown option" (measured, git 2.55.0),
+    // and runGit's contract makes args[0] the subcommand — so there is no
+    // position a CALLER could put it in. It belongs here or nowhere. Valid
+    // globally for every subcommand the provider needs (status, log, diff,
+    // rev-parse, check-ignore, ls-files all exit 0 with it) and composes with
+    // the -c prefix below; re-measured with the full prefix before adding it.
+    '--no-optional-locks',
+    '-c', 'core.fsmonitor=',
+    '-c', `core.hooksPath=${emptyHooksDir()}`,
+    '-c', 'core.sshCommand=',
+    '-c', 'core.askPass=',
+    '-c', 'core.editor=false',
+    '-c', 'core.pager=cat',
+    '-c', 'protocol.ext.allow=never',
+    // deliberately NOT '-c diff.external=' — see the comment on
+    // DIFF_PRODUCING_SUBCOMMANDS just below for why that looked right and was wrong.
+  ]
+}
 
 /**
  * `diff.external` and `.gitattributes`-driven `diff.<driver>.textconv` are two
  * SEPARATE repo-controlled execution vectors on any diff-producing command.
- * Neither can be closed from HARDENING's global `-c` prefix:
+ * Neither can be closed from hardening()'s global `-c` prefix:
  *
  * - `-c diff.external=` (this file's first shipped attempt) does not disable
  *   external diff — it makes git treat external diff as CONFIGURED to the
@@ -45,7 +119,7 @@ const HARDENING = [
  * SUBCOMMAND-scoped, not global: they are valid only immediately after a
  * diff-producing subcommand. `git status --no-ext-diff` exits 129 ("unknown
  * option"), confirmed empirically — so they cannot go in the `-c`-based
- * HARDENING prefix, which is shared by every subcommand `runGit` might run.
+ * hardening() prefix, which is shared by every subcommand `runGit` might run.
  * Kept deliberately small and explicit rather than trying to enumerate every
  * git subcommand that can produce a diff.
  */
@@ -86,9 +160,12 @@ function withDiffSafety(args: string[]): string[] {
  * ~/.gitconfig redirects core.hooksPath, which would silently make the hook
  * test pass here while every other user stayed exploitable. Spec §8.6, §10.
  */
-function childEnv(): NodeJS.ProcessEnv {
+export function gitEnvFor(gitBin: string): NodeJS.ProcessEnv {
   return {
-    PATH: '/usr/bin:/bin',
+    // Derived from the binary we actually resolved, not from an assumed FHS
+    // layout and not from the ambient PATH: still a one-directory allowlist,
+    // but one that exists on whatever machine this is.
+    PATH: dirname(gitBin),
     HOME: process.env.HOME ?? '/nonexistent',
     LANG: 'C',
     GIT_CONFIG_GLOBAL: '/dev/null',
@@ -99,8 +176,8 @@ function childEnv(): NodeJS.ProcessEnv {
 /**
  * `code` is `number` for a normal git exit (including a nonzero one, e.g.
  * `128`) but can be the STRING `'ENOENT'` (or another errno name) when the
- * child process never started at all — e.g. `git` absent from the hardcoded
- * `PATH`. Node's own `ExecFileException.code` is typed `number | string` for
+ * child process never started at all — e.g. no git binary anywhere on the
+ * ambient PATH, so resolveGit() fell back to a path that does not exist. Node's own `ExecFileException.code` is typed `number | string` for
  * exactly this reason; widened here to match, deliberately. Callers must
  * narrow (e.g. `typeof code === 'number'`) before doing exit-code arithmetic,
  * rather than this file casting the string case away.
@@ -110,11 +187,12 @@ export interface GitResult { stdout: string; stderr: string; code: number | stri
 /** THE ONLY PATH TO GIT. test/rungit.test.ts greps src/ to enforce that. */
 export function runGit(repoPath: string, args: string[], opts: { timeoutMs?: number } = {}): Promise<GitResult> {
   const abs = resolve(repoPath)
-  const argv = [...HARDENING, '-C', abs, ...withDiffSafety(args)]
+  const gitBin = resolveGit()
+  const argv = [...hardening(), '-C', abs, ...withDiffSafety(args)]
 
   return new Promise((res) => {
-    execFile('git', argv, {
-      env: childEnv(),
+    execFile(gitBin, argv, {
+      env: gitEnvFor(gitBin),
       timeout: opts.timeoutMs ?? 5000,
       maxBuffer: 16 * 1024 * 1024,
     }, (err, stdout, stderr) => {
