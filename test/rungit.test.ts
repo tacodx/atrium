@@ -190,7 +190,7 @@ test('the hook-free directory is 0700 and owned by us', () => {
  * an import alias, `Bun.spawn`, a multi-line call, a template literal, and
  * `spawnSync`. It will never be airtight — static text matching can't chase
  * every rename — but it should catch the ordinary, unthinking ways a future
- * contributor reaches for git without going through `runGit`. Two layers:
+ * contributor reaches for git without going through `runGit`. Four layers:
  *
  * 1. ANY import of `node:child_process` (or `child_process`) outside
  *    rungit.ts is flagged, regardless of local alias or what's later done
@@ -200,8 +200,23 @@ test('the hook-free directory is 0700 and owned by us', () => {
  *    regardless of argument shape (array literal, template literal, a
  *    variable, multi-line) — `Bun.spawn` is a global, not an import, so layer
  *    1 can't see it; this layer doesn't need to see the argument at all.
+ * 3. ANY use of `Bun.$`, Bun's shell, in any spelling: the global, a
+ *    destructure (`const { $ } = Bun`), or `import { $ } from 'bun'`. Added by
+ *    the final whole-branch review, which measured that all four forms passed
+ *    every other layer, and `Bun.$` is present in the pinned bun 1.3.11.
+ *    Layers 1 and 2 miss it (no import, not spawn) and so does layer 4 (the
+ *    backtick content is `git status`, not `git`). The reason this one matters
+ *    more than the exotic evasions above: in a Bun codebase Bun.$`git status`
+ *    is the IDIOMATIC way to shell out. A tripwire that catches six exotic
+ *    evasions and misses the ordinary one has its calibration inverted. This
+ *    layer has NO exemption, actions.ts included — that file's own rule is
+ *    execFile with no shell, ever.
+ * 4. ANY literal reference to a git command or binary — a quoted
+ *    `'git'`/`"git"`/`` `git` ``, or a quoted path ending in `.../git`
+ *    (`'/usr/bin/git'` and similar) — in EVERY file under src/, not just
+ *    actions.ts.
  *
- * Together these do not depend on spotting the literal string "git" at a call
+ * Layers 1-3 do not depend on spotting the literal string "git" at a call
  * site, which is exactly what a variable-held name or an alias defeats.
  *
  * `src/core/actions.ts` (Task 7) is the OTHER deliberate `execFile` call site
@@ -213,26 +228,36 @@ test('the hook-free directory is 0700 and owned by us', () => {
  * on review: exempting it from layers 1/2 entirely would leave the ONE file
  * whose whole job is spawning subprocesses completely unscanned for a git
  * call, which is exactly where a future contributor is likeliest to add one
- * without thinking — silently defeating this tripwire's actual purpose.
+ * without thinking — silently defeating this tripwire's actual purpose. So it
+ * is exempt from layers 1 and 2 ONLY, and layers 3 and 4 still apply to it.
  *
- * So `actions.ts` gets a narrower, third layer instead of a blanket
- * exemption: layers 1 and 2 don't apply to it (it legitimately imports
- * `child_process`), but it is still scanned for a literal reference to a
- * `git` command or binary — a quoted `'git'`/`"git"`/`` `git` ``, or a quoted
- * path ending in `.../git` (`'/usr/bin/git'` and similar). This is
- * necessarily narrower than layers 1/2 (a variable built from string
- * concatenation, e.g. `'gi' + 't'`, would still slip past it — the same
- * "not a proof" limitation the module doc already accepts for every other
- * evasion this tripwire can't chase), but it is the correct trade-off named
- * by review: a git-specific check on the one file that needs a
- * child_process/Bun.spawn exemption, not a wholesale exemption from the
- * whole tripwire.
+ * WHY LAYER 4 COVERS ALL OF src/ (final review I3): Task 5 built the runGit
+ * chokepoint and Task 7 built an unguarded exec path beside it, and neither
+ * task's diff contained both halves, so no per-task review could see that a
+ * provider writing
+ *
+ *     { kind: 'exec', id: 'diff', argv: (t) => ({ cmd: 'git', args: [...] }) }
+ *
+ * in src/providers/git/actions.ts reaches the git binary with NO hardening
+ * prefix, NO env allowlist and the full process.env. Scoping the git-literal
+ * check to actions.ts by exact path equality meant every OTHER file was
+ * checked only by layers 1 and 2, which that declaration passes cleanly.
+ * Widening it was measured to be zero-false-positive: applying it to every
+ * .ts file under src/ yields exactly one hit, rungit.ts itself, which is
+ * skipped. It is necessarily narrower than layers 1-3 (a name built by
+ * concatenation still slips past — the same "not a proof" limitation this
+ * module already accepts), which is why buildArgv ALSO rejects the git binary
+ * at run time, where a name assembled at run time is visible.
  */
 const RUNGIT_PATH = join('src', 'core', 'rungit.ts')
 const ACTIONS_PATH = join('src', 'core', 'actions.ts')
 
 const CHILD_PROCESS_IMPORT = /\bfrom\s+['"](?:node:)?child_process['"]|require\(\s*['"](?:node:)?child_process['"]\s*\)/
 const BUN_SPAWN_CALL = /\bBun\.(?:spawn|spawnSync)\s*\(/
+// `Bun.$` as a global, plus `$` pulled out of bun by destructure or by named
+// import. Deliberately does NOT flag every `from 'bun'` import — serve.ts
+// legitimately imports embeddedFiles from it — only one that names `$`.
+const BUN_SHELL = /\bBun\.\$|\{[^}]*\$[^}]*\}\s*(?:from\s+['"]bun['"]|=\s*Bun\b)/
 // Backreference to the opening quote so this only matches a quoted string
 // whose ENTIRE content is "git" or ends in a path separator then "git" —
 // deliberately narrow enough to leave "legit", "digit", ".gitignore", and
@@ -243,10 +268,10 @@ const GIT_LITERAL = /(['"`])(?:[^'"`]*[\\/])?git\1/i
 
 function scanFile(file: string, content: string): string[] {
   const offenders: string[] = []
-  if (file === ACTIONS_PATH) {
-    if (GIT_LITERAL.test(content)) offenders.push(`${file}: references git directly`)
-    return offenders
-  }
+  // Layers 3 and 4 apply to every file, actions.ts included.
+  if (BUN_SHELL.test(content)) offenders.push(`${file}: uses Bun.$ (a shell)`)
+  if (GIT_LITERAL.test(content)) offenders.push(`${file}: references git directly`)
+  if (file === ACTIONS_PATH) return offenders
   if (CHILD_PROCESS_IMPORT.test(content)) offenders.push(`${file}: imports node:child_process`)
   if (BUN_SPAWN_CALL.test(content)) offenders.push(`${file}: calls Bun.spawn/Bun.spawnSync`)
   return offenders
@@ -304,4 +329,53 @@ test('actions.ts: a synthetic git invocation is caught even though child_process
   // substrings already present in this codebase must stay clean.
   expect(scanFile(ACTIONS_PATH, real + `\nconst f = '.gitignore'\n`)).toEqual([])
   expect(scanFile(ACTIONS_PATH, real + `\nconst f = 'legit'\n`)).toEqual([])
+})
+
+// Final review I3. This is the declaration that was invisible: a provider file
+// is not actions.ts, so the git-literal layer never ran on it, and it imports
+// nothing and calls no spawn, so layers 1 and 2 pass it cleanly. The action
+// layer's own runtime guard (buildArgv) is the other half — see
+// test/actions.test.ts, "the git chokepoint reaches the action layer".
+test('a provider declaring an exec action on the git binary is caught too, not just actions.ts', () => {
+  const providerFile = join('src', 'providers', 'git', 'actions.ts')
+  const declaration = `
+export const actions = [
+  { kind: 'exec', id: 'diff', label: 'Show diff', argv: (t) => ({ cmd: 'git', args: ['-C', t.path, 'diff'] }) },
+]
+`
+  expect(scanFile(providerFile, declaration)).toEqual([`${providerFile}: references git directly`])
+
+  const viaPath = declaration.replace("cmd: 'git'", "cmd: '/usr/bin/git'")
+  expect(scanFile(providerFile, viaPath)).toEqual([`${providerFile}: references git directly`])
+})
+
+// Final review M1. All four forms passed all three of the previous layers, and
+// Bun.$ exists in the pinned 1.3.11 (typeof Bun.$ === 'function').
+test('Bun.$, the idiomatic way to shell out in a Bun codebase, is caught in every spelling', () => {
+  const file = join('src', 'server', 'routes.ts')
+  const forms = [
+    'await Bun.$`git status`',
+    'await Bun.$`git status`.quiet()',
+    "const { $ } = Bun\nawait $`git status`",
+    "import { $ } from 'bun'\nawait $`git status`",
+  ]
+  for (const form of forms) {
+    expect(scanFile(file, form)).toContain(`${file}: uses Bun.$ (a shell)`)
+  }
+
+  // It is a shell, so it is barred even from actions.ts, whose exemption
+  // covers execFile only: "execFile(cmd, args[]) with NO shell".
+  expect(scanFile(ACTIONS_PATH, 'await Bun.$`code --wait file`')).toEqual([`${ACTIONS_PATH}: uses Bun.$ (a shell)`])
+
+  // And it must not fire on the ordinary bun imports this codebase really has.
+  expect(scanFile(file, "import { embeddedFiles } from 'bun'")).toEqual([])
+  expect(scanFile(file, 'const { stdout } = Bun.spawnSync([bin])')).toContain(`${file}: calls Bun.spawn/Bun.spawnSync`)
+  expect(scanFile(file, 'const url = `${base}/api/state`')).toEqual([])
+})
+
+test('the real src/ tree is clean under all four layers', () => {
+  for (const file of walk('src')) {
+    if (file === RUNGIT_PATH) continue
+    expect(scanFile(file, readFileSync(file, 'utf8'))).toEqual([])
+  }
 })
