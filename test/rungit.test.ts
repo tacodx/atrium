@@ -139,6 +139,33 @@ test('runs the git it resolved from PATH, with --no-optional-locks before the su
   expect(recorded).toContain(`PATH=${dir}`)
 })
 
+// Plan 2 T1. A timed-out runGit reports `code: 1`, which is the SAME value a
+// successful-but-negative probe returns — `check-ignore -q` exits 1 on a miss.
+// §7.1's classifier reads "not exit 0" as "not ignored", so without a separate
+// channel every timed-out probe would classify as ambiguous and drop the repo.
+// Both halves are asserted here: the collision is real, and `timedOut` splits it.
+test('a timed-out git is reported as timedOut, not as a bare exit 1 indistinguishable from a real miss', async () => {
+  const sleepBin = Bun.which('sleep')
+  expect(sleepBin).not.toBeNull()          // no vacuous pass if the shim cannot block
+  const dir = mkdtempSync(join(tmpdir(), 'atrium-slowgit-'))
+  writeFileSync(join(dir, 'git'), `#!/bin/sh\nexec ${sleepBin} 5\n`, { mode: 0o755 })
+
+  const timed = await (async () => {
+    const saved = process.env.PATH
+    process.env.PATH = dir
+    try { return await runGit(tmpdir(), ['status', '--porcelain=v2', '--branch'], { timeoutMs: 250 }) }
+    finally { process.env.PATH = saved }
+  })()
+
+  expect(timed.code).toBe(1)               // the collision itself: NOT distinguishable on code alone
+  expect(timed.timedOut).toBe(true)
+
+  const repo = makeRepo()
+  const miss = await runGit(repo, ['check-ignore', '-q', '--', 'not-ignored.txt'])
+  expect(miss.code).toBe(1)                // the same code, through the real binary
+  expect(miss.timedOut).toBe(false)
+})
+
 test('gitEnvFor stays a from-scratch allowlist, with PATH derived from the binary', () => {
   const env = gitEnvFor('/nix/store/1a2b3c-git-2.55.0/bin/git')
   expect(env.PATH).toBe('/nix/store/1a2b3c-git-2.55.0/bin')

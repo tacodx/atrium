@@ -181,8 +181,28 @@ export function gitEnvFor(gitBin: string): NodeJS.ProcessEnv {
  * exactly this reason; widened here to match, deliberately. Callers must
  * narrow (e.g. `typeof code === 'number'`) before doing exit-code arithmetic,
  * rather than this file casting the string case away.
+ *
+ * `timedOut` exists because `code` alone cannot tell a timeout from a real
+ * failure. Measured on bun 1.3.11: when execFile's timeout option fires, the
+ * error it hands back carries `code === null`, `killed === true` and
+ * `signal === 'SIGTERM'`, so the `err.code ?? 1` fallback below reports
+ * `code: 1` — indistinguishable from a child that genuinely exited 1. That
+ * collision is load-bearing for the repo classifier in spec §7.1, whose
+ * container row surfaces a child only when a check-ignore -q probe exits 0,
+ * and whose ordinary miss is exit 1: with no separate channel a timed-out
+ * probe reads as "not ignored", falls through to the ambiguous row, and the
+ * repo is silently dropped from the dashboard instead of being retried.
+ *
+ * The derivation reads `killed`, NOT `signal`. `killed` is true only when this
+ * process called kill(), and the timeout option below is the only thing here
+ * that does. A child killed by an EXTERNAL signal — the OOM killer, a SIGSEGV
+ * — reports `killed: false` with `signal` set (measured: a self-SIGKILL gives
+ * `code: null`, `killed: false`, `signal: SIGKILL`), and that is a crash, not
+ * a timeout; deriving from `signal` instead would mislabel it. TRIPWIRE: if an
+ * AbortSignal is ever added to the execFile options below, `killed` becomes
+ * true on abort as well, and this derivation must be revisited.
  */
-export interface GitResult { stdout: string; stderr: string; code: number | string }
+export interface GitResult { stdout: string; stderr: string; code: number | string; timedOut: boolean }
 
 /** THE ONLY PATH TO GIT. test/rungit.test.ts greps src/ to enforce that. */
 export function runGit(repoPath: string, args: string[], opts: { timeoutMs?: number } = {}): Promise<GitResult> {
@@ -198,7 +218,7 @@ export function runGit(repoPath: string, args: string[], opts: { timeoutMs?: num
     }, (err, stdout, stderr) => {
       // err.code is already number | string per Node's own ExecFileException
       // type — no cast needed, and none should be added (see GitResult above).
-      res({ stdout, stderr, code: err ? (err.code ?? 1) : 0 })
+      res({ stdout, stderr, code: err ? (err.code ?? 1) : 0, timedOut: err?.killed === true })
     })
   })
 }
