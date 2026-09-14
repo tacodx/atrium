@@ -2,6 +2,9 @@
 
 **Date:** 2026-09-13
 **Status:** Accepted
+**Corrected:** 2026-09-14 — two claims in this document were not true as
+written. See "Not measured" and "Correction 2" below. Nothing in the Decision
+changed; what changed is how much evidence it is recorded as resting on.
 
 ## Measured
 - bun version tested: `1.3.11`
@@ -20,6 +23,41 @@
 - `Bun.secrets` round-trip in a compiled binary: ok (`keyring ok`, GNOME
   Secret Service via libsecret on this machine)
 - dual-stack TLS helper unit tests: pass (`2 pass, 0 fail, 4 expect() calls`)
+  — this is a unit-test result, **not** a TLS measurement. It sat in this list
+  beside genuinely measured items and read as though §7.3's requirement had
+  been met. It had not. See "Not measured" immediately below.
+
+## Not measured
+
+**Correction 1 (2026-09-14, final whole-branch review).** No TLS handshake was
+ever performed, on this bun version or any other.
+
+- §7.3 requires "an integration test asserts a non-empty peer certificate and
+  must fail if the workaround is removed."
+- §12's Task 0 makes "a TLS handshake to `imap.gmail.com` yields a non-empty
+  peer certificate" part of the walking skeleton.
+- §5.1 calls the bun version "load-bearing for asset embedding, TLS, and
+  secret storage."
+
+What exists is `test/tls-helper.test.ts`: two unit tests over injected
+`lookup`/`probe` fakes, exercising address-selection logic only. Both tests
+substitute their own `probe`, so no socket is opened; the module's real probe
+is in any case a plain `node:net` connect, so no TLS layer is involved in this
+file at all, no certificate is inspected anywhere in the repo, and
+`imap.gmail.com` is never contacted. Removing the workaround from a real imap
+call site (there is none yet — mail is Plan 2) would turn nothing red.
+`src/net/tls-connect.ts` is imported by that test and by nothing else: it is
+dead code today, and `resolveDualStack`'s doc comment overstates what its test
+guards.
+
+**Consequence, stated plainly: the `engines.bun >= 1.3.11` floor rests on two
+of its three load-bearing questions, not three.** Asset embedding and
+`Bun.secrets` were genuinely measured against a compiled binary. TLS was not
+measured at all, so this ADR asserts nothing about 1.3.11's TLS behaviour, and
+a future reader must not treat the floor as evidence that it works. Taking the
+live handshake belongs to Plan 2's mail task; it was deliberately NOT rushed
+into this correction, because inventing a measurement to make a document
+consistent is the failure this correction exists to undo.
 
 ## Decision
 `engines.bun` floor is `>=1.3.11` (the version installed on this machine).
@@ -64,6 +102,26 @@ correctly (proven by the packaging assertion actually serving the content).
 `bun run scripts/gen-assets.ts && bunx tsc --noEmit` is clean with the
 suppression in place; without it `tsc --noEmit` fails on the generated file on
 every regeneration.
+
+**Correction 2 (2026-09-14, final whole-branch review).** The sentence above
+was written at Task 1 and was true then. It stopped being true somewhere in
+the following five tasks: by the end of the branch `tsc --noEmit` reported 5
+errors — 4 in `test/actions.test.ts`, 1 in `test/auth.test.ts`, all from the
+deliberately enabled `noUncheckedIndexedAccess`, none in `src/`, and none in
+the generated file this paragraph is about. The claim was therefore still
+accurate about the `@ts-nocheck` suppression and inaccurate as a statement
+about the repo.
+
+The reason the regression survived five tasks is that **nothing ran the
+command.** There was no `test` script and no `typecheck` script in
+`package.json`, so neither the suite nor the typecheck ran for anyone who
+cloned the repo. Both errors are fixed and both scripts now exist
+(`bun run typecheck` = `gen:assets` then `tsc --noEmit`, which is this
+paragraph's command with the prerequisite wired in). The claim is true again
+*and* enforced by something a contributor can run — but note that no CI
+executes either script, so enforcement is still local-only; §5.1's "CI pins
+the same version" and §10's "fails CI" both assume a CI that does not exist
+in this plan.
 
 **Three bugs were found and fixed in the brief's verbatim `scripts/assert-package.ts`.**
 The first two are load-bearing for a correct measurement rather than a false
