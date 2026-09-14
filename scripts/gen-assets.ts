@@ -5,7 +5,11 @@
 // way: one explicit `import x from "<file>" with { type: "file" }` per dist
 // file, each one referenced at runtime via ASSET_PATHS. An import that isn't
 // referenced is dropped by dead-code elimination, so this generated module and
-// the map it exports must both be consumed (src/skeleton.ts does this).
+// the map it exports must both be consumed — src/server/routes.ts is the
+// consumer (loadAssets() reads every entry into a Map of Bun.file(diskPath),
+// which serveAsset() serves from). It was src/skeleton.ts until Task 4 deleted
+// that file; the stale name sat here through three more tasks, which is why
+// this one names the function as well as the module.
 //
 // Regenerate before every `--compile` build: `bun run scripts/gen-assets.ts`.
 import { readdirSync, writeFileSync } from 'node:fs'

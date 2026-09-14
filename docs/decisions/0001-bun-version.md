@@ -2,9 +2,10 @@
 
 **Date:** 2026-09-13
 **Status:** Accepted
-**Corrected:** 2026-09-14 — two claims in this document were not true as
-written. See "Not measured" and "Correction 2" below. Nothing in the Decision
-changed; what changed is how much evidence it is recorded as resting on.
+**Corrected:** 2026-09-14 — three claims in this document were not true as
+written. See "Not measured", "Correction 2" and "Correction 3" below. Nothing
+in the Decision changed; what changed is how much evidence it is recorded as
+resting on.
 
 ## Measured
 - bun version tested: `1.3.11`
@@ -73,9 +74,9 @@ run `bun upgrade`. 1.3.11 is capable of everything this skeleton requires
 supported. `scripts/gen-assets.ts` is therefore **PERMANENT, not temporary**:
 it scans `web-dist/` and generates `src/generated-assets.ts`, one
 `import assetN from "<file>" with { type: "file" }` per dist file, exported as
-an `ASSET_PATHS: Record<url-path, disk-path>` map. `src/skeleton.ts` builds its
-route table from that map (`Bun.file(diskPath)` per entry) rather than from
-`Bun.embeddedFiles` directly, because on 1.3.11 an embedded `with { type:
+an `ASSET_PATHS: Record<url-path, disk-path>` map. `src/server/routes.ts`
+builds its route table from that map (`Bun.file(diskPath)` per entry) rather
+than from `Bun.embeddedFiles` directly, because on 1.3.11 an embedded `with { type:
 "file" }` import is renamed to a flattened, content-hashed filename inside the
 binary (e.g. `sub/style.css` → `style-5zbvvaxz.css`, no subdirectory, a
 different hash than Vite's own) — verified empirically with a throwaway
@@ -158,3 +159,22 @@ Service is present but unresponsive, so every call must stay wrapped in the
 same `Promise.race` timeout used here (which does not cancel the underlying
 call — a timed-out call can still complete or fail later, so callers must not
 assume the raced-away promise is inert).
+
+**Correction 3 (2026-09-14, final whole-branch review).** The paragraph above
+named `src/skeleton.ts` as the module that builds its route table from
+`ASSET_PATHS`. That file was deleted in Task 4 and no longer exists. Verified
+rather than assumed: `ASSET_PATHS` is consumed in exactly one place,
+`src/server/routes.ts`'s `loadAssets()`, which reads it entry by entry into a
+`Map<urlPath, Bun.file(diskPath)>` that `serveAsset()` then serves from; the
+name above has been corrected to point there.
+
+One detail the old wording obscured and that matters for the DCE hazard this
+whole section is about: `routes.ts` imports the generated module
+**dynamically**, not statically, because the module is gitignored and does not
+exist until `build:web && gen:assets` has run, and a static import would make
+every unit test fail to load. That is still DCE-safe here only because `bun
+build --compile` emits a single bundled output with no code-splitting, so the
+generated module's own nested static `with { type: "file" }` imports are
+embedded anyway. The end-to-end proof of that is the packaging assertion,
+which serves real bytes out of the compiled binary from a foreign cwd — not
+the import statement's shape.
