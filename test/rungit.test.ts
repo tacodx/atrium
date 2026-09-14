@@ -375,7 +375,7 @@ test('actions.ts: a synthetic git invocation is caught even though child_process
 // layer's own runtime guard (buildArgv) is the other half — see
 // test/actions.test.ts, "the git chokepoint reaches the action layer".
 test('a provider declaring an exec action on the git binary is caught too, not just actions.ts', () => {
-  const providerFile = join('src', 'providers', 'git', 'actions.ts')
+  const providerFile = join('src', 'providers', 'repos', 'actions.ts')
   const declaration = `
 export const actions = [
   { kind: 'exec', id: 'diff', label: 'Show diff', argv: (t) => ({ cmd: 'git', args: ['-C', t.path, 'diff'] }) },
