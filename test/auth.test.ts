@@ -79,7 +79,10 @@ describe('bearer verification', () => {
   })
 
   test('rejects a missing header, a wrong scheme, and a wrong token', () => {
-    const cases = [{}, { authorization: auth.sessionToken }, { authorization: 'Bearer nope' }]
+    // Typed rather than inferred: the inferred union of `{}` with the other
+    // two is `{ authorization?: undefined } | { authorization: string }`,
+    // which is not a HeadersInit under noUncheckedIndexedAccess.
+    const cases: Record<string, string>[] = [{}, { authorization: auth.sessionToken }, { authorization: 'Bearer nope' }]
     for (const headers of cases) {
       expect(auth.verifyBearer(new Request('http://127.0.0.1:7373/api/state', { headers }))).toBe(false)
     }
