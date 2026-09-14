@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { readFileSync, readdirSync, statSync, existsSync, mkdtempSync, writeFileSync, symlinkSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync, existsSync, mkdtempSync, mkdirSync, chmodSync, writeFileSync, symlinkSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { makeRepo, makeMaliciousRepo, makeSingleVectorRepo, wasPwned } from './fixtures/gitrepo'
@@ -175,6 +175,44 @@ test('the hook-free directory is one stable per-user path, not one per process s
   expect(first).toBe(second)
   expect(existsSync(first)).toBe(true)
   expect(readdirSync(first)).toEqual([])             // still hook-free
+})
+
+// The other half of moving to a STABLE path: a predictable name is only safe
+// while nobody else can have created it. $XDG_RUNTIME_DIR is 0700 and per-user
+// so nobody can, but the /tmp fallback is world-writable, and a directory
+// another local user pre-created is a directory another local user controls —
+// i.e. they choose git's hooksPath, which is the exact vector this points away
+// from. These drive the refusal through a REAL child process, because the
+// check reads the environment and memoises, so one process cannot exercise
+// both outcomes.
+function hooksDirUnder(runtimeDir: string): string {
+  const script = join(mkdtempSync(join(tmpdir(), 'atrium-probe-')), 'probe.ts')
+  writeFileSync(script, `import { emptyHooksDir } from '${join(process.cwd(), 'src/core/rungit.ts')}'\nconsole.log(emptyHooksDir())\n`)
+  const r = Bun.spawnSync([process.execPath, 'run', script], { env: { ...process.env, XDG_RUNTIME_DIR: runtimeDir } })
+  return new TextDecoder().decode(r.stdout).trim()
+}
+
+test('a group- or world-writable hooks directory is refused, not used', () => {
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'atrium-hijack-'))
+  const hijacked = join(runtimeDir, 'atrium', 'nohooks')
+  mkdirSync(hijacked, { recursive: true })
+  chmodSync(hijacked, 0o777)                       // what a pre-creating attacker leaves
+
+  const used = hooksDirUnder(runtimeDir)
+  expect(used).not.toBe(hijacked)                  // fell back to an unpredictable name
+  expect(existsSync(used)).toBe(true)
+  expect(statSync(used).mode & 0o022).toBe(0)      // and that one really is ours alone
+})
+
+test('a symlink standing in for the hooks directory is refused, not followed', () => {
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'atrium-symlink-'))
+  const elsewhere = mkdtempSync(join(tmpdir(), 'atrium-elsewhere-'))
+  mkdirSync(join(runtimeDir, 'atrium'), { recursive: true })
+  symlinkSync(elsewhere, join(runtimeDir, 'atrium', 'nohooks'))
+
+  const used = hooksDirUnder(runtimeDir)
+  expect(used).not.toBe(join(runtimeDir, 'atrium', 'nohooks'))
+  expect(used).not.toBe(elsewhere)
 })
 
 test('the hook-free directory is 0700 and owned by us', () => {
