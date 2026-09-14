@@ -25,8 +25,10 @@ renameSync(DIST, parked)
 // ASSET_PATHS manifest, pre-auth, manifest-only. Both checks below are hard
 // failures: a zero (or short) embedded-asset count means DCE dropped the
 // manifest, and a non-200 `GET /` means the route isn't actually wired.
-let failures: string[] = []
+const failures: string[] = []
 let embedded = 0
+let cssHref: string | undefined
+let jsSrc: string | undefined
 
 try {
   const proc = Bun.spawn([BIN, 'serve', '--port', '7373'], { cwd: '/tmp', stdout: 'pipe', stderr: 'pipe' })
@@ -76,12 +78,24 @@ try {
   }
 
   const body = await html.text()
-  const cssHref = body.match(/href="([^"]+\.css)"/)?.[1]
-  const jsSrc = body.match(/src="([^"]+\.js)"/)?.[1]
+  cssHref = body.match(/href="([^"]+\.css)"/)?.[1]
+  jsSrc = body.match(/src="([^"]+\.js)"/)?.[1]
 
-  if (cssHref) {
+  // Spec §10 requires GET / AND one hashed JS and CSS asset to return 200 with
+  // the right content-type. These checks used to sit inside `if (cssHref)` /
+  // `if (jsSrc)`, so a regex that failed to match made the requirement VANISH
+  // and the script still printed "packaging ok" — measured against a plausible
+  // index.html emitting <link rel="modulepreload" href="...js"> instead of
+  // <script src="...js">. This project has already shipped one Critical (the
+  // diff.external regression) whose root cause was a check passing for the
+  // wrong reason; a release gate that can go vacuous is worse than no gate,
+  // because it is believed. An unmatched href/src is now a failure.
+  if (!cssHref) {
+    failures.push('no hashed CSS asset referenced from index.html (href="....css" did not match)')
+  } else {
     const css = await fetch(`http://127.0.0.1:7373${cssHref}`)
     const text = await css.text()
+    if (css.status !== 200) failures.push(`GET ${cssHref} returned ${css.status}`)
     if (css.headers.get('content-type')?.includes('text/css') !== true)
       failures.push(`css content-type was ${css.headers.get('content-type')}`)
     // The canary element uses p-4; if Tailwind emitted nothing this is absent
@@ -99,9 +113,15 @@ try {
       failures.push('served CSS contains no Tailwind utility — v3 config artifacts?')
   }
 
-  if (jsSrc) {
+  if (!jsSrc) {
+    failures.push('no hashed JS asset referenced from index.html (src="....js" did not match)')
+  } else {
     const js = await fetch(`http://127.0.0.1:7373${jsSrc}`)
     const text = await js.text()
+    if (js.status !== 200) failures.push(`GET ${jsSrc} returned ${js.status}`)
+    // The CSS branch checked its content-type and this one never did.
+    if (/javascript|ecmascript/.test(js.headers.get('content-type') ?? '') !== true)
+      failures.push(`js content-type was ${js.headers.get('content-type')}`)
     if (text.includes('react-dom.development'))
       failures.push('served JS is a development build')
   }
@@ -116,4 +136,7 @@ if (failures.length) {
   for (const f of failures) console.error(`  - ${f}`)
   process.exit(1)
 }
-console.log(`packaging ok: ${embedded} of ${expected} assets embedded, served from a foreign cwd`)
+console.log(
+  `packaging ok: ${embedded} of ${expected} assets embedded, served from a foreign cwd; ` +
+  `hashed CSS (${cssHref}) and JS (${jsSrc}) both served with the right content-type`,
+)
