@@ -24,7 +24,7 @@ Every table below was produced by running the code, on this machine, on 2026-09-
 ## Ruling A — the provider id is `repos`, and `GIT_LITERAL` is left completely unedited
 
 **Decided.** The provider id is `repos`. Its directory is `src/providers/repos/`. Its config prefix is `repos.*`
-(Ruling C). And `test/rungit.test.ts:332`'s `GIT_LITERAL` regex is left **byte-identical** to how Plan 1 left it:
+(Ruling C). And `test/rungit.test.ts:360`'s `GIT_LITERAL` regex is left **byte-identical** to how Plan 1 left it:
 
 ```js
 const GIT_LITERAL = /(['"`])(?:[^'"`]*[\\/])?git\1/i
@@ -71,7 +71,7 @@ and not a command. To be correct that exemption would have to cover `id:` declar
 (`providerId === 'git'`), config-key lookups, snapshot keys, and route path segments: a surface wider than any
 paired test that would guard it, in a file whose entire job is to be a tripwire. Layer 4 was widened from
 `actions.ts` alone to **all of `src/`** as Plan 1 final-review finding I3, precisely to catch a provider file
-declaring `cmd: 'git'`; the reasoning is recorded at `test/rungit.test.ts:299-315`. Loosening it one plan later,
+declaring `cmd: 'git'`; the reasoning is recorded at `test/rungit.test.ts:327-344`. Loosening it one plan later,
 to accommodate a name we are free to choose, would undo that finding for no gain.
 
 Stated bluntly: loosening a tripwire in one task while another task adds the file it was widened to cover is
@@ -81,10 +81,10 @@ exactly the bypass that shipped in Plan 1. Choosing a different provider name co
 
 Two tests, both pre-existing and unchanged by this plan:
 
-- `test/rungit.test.ts:356` — "no source file calls git outside runGit (tripwire, not a proof)"
-- `test/rungit.test.ts:441` — "the real src/ tree is clean under all four layers"
+- `test/rungit.test.ts:384` — "no source file calls git outside runGit (tripwire, not a proof)"
+- `test/rungit.test.ts:469` — "the real src/ tree is clean under all four layers"
 
-`src/core/rungit.ts` is the **one skipped file** (`test/rungit.test.ts:359`, `:443`) — it is the resolver, so it
+`src/core/rungit.ts` is the **one skipped file** (`test/rungit.test.ts:387`, `:471`) — it is the resolver, so it
 necessarily names the binary. `src/core/actions.ts` is exempt from **layers 1 and 2 only** (the
 `node:child_process` import and the `Bun.spawn` call): layers 3 (`Bun.$`) and 4 (the git literal) still apply to
 it, because the one file whose job is spawning subprocesses is exactly where an unthinking git call would land.
@@ -114,7 +114,7 @@ contradictory and is part of what this ruling resolves: an `exec` action can nev
 
 At run time `buildArgv` throws: `src/core/actions.ts:54-58`, matching `out.cmd` against `GIT_COMMAND`
 (`src/core/actions.ts:14`). Statically, layer 4 of the tripwire flags the quoted literal in any file under `src/`
-— which is exactly the declaration Ruling A's paired pin at `test/rungit.test.ts:404` asserts is caught.
+— which is exactly the declaration Ruling A's paired pin at `test/rungit.test.ts:432` asserts is caught.
 
 ### Shape 2 — a terminal wrapper. Passes `buildArgv`, and is the §8.6 RCE re-entered.
 
@@ -268,10 +268,16 @@ in `runGit` that does so. A child killed by an **external** signal — the OOM k
 `killed: false` with `signal` set (row 6 above), and must not be called a timeout: it is a crash, and a retry
 policy that treats it as a timeout will retry a process that will die the same way again.
 
-The tempting alternative `timedOut: err?.signal != null` is **wrong and untested**. It passes the covering test —
-measured — because a genuine exit 1 gives `signal: null` and a timeout gives `'SIGTERM'`, so both of that test's
-assertions still hold. It differs only for row 6, which the test cannot produce. That derivation is excluded by
-this document and by review, **not** by a test. It is recorded here as uncovered rather than counted as covered.
+**This is pinned by a test, not merely by review.** It did not start that way. A timeout-and-miss pair constrains
+`timedOut` only as "true on a timeout, false on a plain exit 1", and every wrong derivation in the obvious family
+agrees with the correct one on exactly those two points — `err?.signal != null`, `err?.code === null` and
+`typeof err?.code !== 'number'` all passed. Row 6 is the shape that separates them, because it is the only one
+with a signal set and `killed` false, and the PATH-shadow technique already in the file reaches `runGit` with it.
+
+The crash case — "a crashed git is NOT a timeout: killed by an external signal, same exit code, timedOut false" —
+kills all three at once, each failing on `expect(crashed.timedOut).toBe(false)` with `Received: true` and each
+leaving every other test in the file green. That last detail is the point: the timeout test alone constrained none
+of them.
 
 ### Tripwire on the derivation
 

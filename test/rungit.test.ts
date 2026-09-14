@@ -166,6 +166,34 @@ test('a timed-out git is reported as timedOut, not as a bare exit 1 indistinguis
   expect(miss.timedOut).toBe(false)
 })
 
+// Fix round 1, Important 1. The test above constrains `timedOut` only as "true
+// on a timeout, false on a plain exit 1" — and EVERY wrong derivation in the
+// obvious family agrees with the correct one on exactly those two points:
+// `err?.signal != null`, `err?.code === null` and `typeof err?.code !== 'number'`
+// all pass it. A crashed child is the case that separates them, because it is
+// the one shape with a signal set and `killed` false. T8 builds its per-repo
+// backoff on this field, so a derivation that calls a crash a timeout retries a
+// process that will die exactly the same way every time. No timing dependency
+// here: the shim kills itself immediately (measured ~11ms).
+test('a crashed git is NOT a timeout: killed by an external signal, same exit code, timedOut false', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'atrium-crashgit-'))
+  writeFileSync(join(dir, 'git'), '#!/bin/sh\nkill -9 $$\n', { mode: 0o755 })
+
+  const crashed = await (async () => {
+    const saved = process.env.PATH
+    process.env.PATH = dir
+    try { return await runGit(tmpdir(), ['status', '--porcelain=v2', '--branch']) }
+    finally { process.env.PATH = saved }
+  })()
+
+  // Measured: err.code is null and err.signal is 'SIGKILL', so the `?? 1`
+  // fallback reports 1 — the SAME code as a timeout and as a real miss. The
+  // whole point of the field is that code cannot tell these three apart.
+  expect(crashed.code).toBe(1)
+  // `killed` is false here: this process never called kill(), the child did.
+  expect(crashed.timedOut).toBe(false)
+})
+
 test('gitEnvFor stays a from-scratch allowlist, with PATH derived from the binary', () => {
   const env = gitEnvFor('/nix/store/1a2b3c-git-2.55.0/bin/git')
   expect(env.PATH).toBe('/nix/store/1a2b3c-git-2.55.0/bin')
