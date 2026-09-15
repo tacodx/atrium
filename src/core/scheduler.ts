@@ -69,9 +69,26 @@ export function createScheduler(registry: Registry, opts: { config: Record<strin
   }
 
   /**
-   * A freshly allocated envelope on every call — never the live record objects,
-   * so a consumer cannot mutate the scheduler's state through it.
+   * One provider's envelope, freshly allocated — never the live record objects,
+   * so a consumer cannot mutate the scheduler's state through it. undefined for
+   * a provider that has neither succeeded nor failed.
    *
+   * Split out of buildSnapshot() because notify() needs exactly one provider's
+   * envelope: building all of them and discarding the rest is free with one
+   * provider and O(all providers x all schedules) per poll once there are
+   * several and an onUpdate -> publish wire exists.
+   */
+  function buildStatus(providerId: string): ProviderStatus | undefined {
+    const perSchedule = health.get(providerId)
+    if (!perSchedule) return undefined
+    const schedules: Record<string, ScheduleHealth> = {}
+    for (const [name, h] of perSchedule) schedules[name] = { ...h }
+    return last.has(providerId)
+      ? { data: last.get(providerId), schedules }
+      : { schedules }
+  }
+
+  /**
    * `health` is the authoritative id set: every non-aborted success and every
    * non-aborted failure writes a health entry, and `last` is only ever written
    * alongside one. A provider that has neither succeeded nor failed produces no
@@ -79,12 +96,9 @@ export function createScheduler(registry: Registry, opts: { config: Record<strin
    */
   function buildSnapshot(): Record<string, ProviderStatus> {
     const out: Record<string, ProviderStatus> = {}
-    for (const [providerId, perSchedule] of health) {
-      const schedules: Record<string, ScheduleHealth> = {}
-      for (const [name, h] of perSchedule) schedules[name] = { ...h }
-      out[providerId] = last.has(providerId)
-        ? { data: last.get(providerId), schedules }
-        : { schedules }
+    for (const providerId of health.keys()) {
+      const status = buildStatus(providerId)
+      if (status) out[providerId] = status
     }
     return out
   }
@@ -93,7 +107,7 @@ export function createScheduler(registry: Registry, opts: { config: Record<strin
   // the failure record with it and a consumer never has to re-read snapshot()
   // to find out whether what it just received is fresh or stale.
   function notify(providerId: string): void {
-    const status = buildSnapshot()[providerId]
+    const status = buildStatus(providerId)
     if (!status) return
     for (const l of listeners) l(providerId, status)
   }
