@@ -1,5 +1,7 @@
+import { readFileSync } from 'node:fs'
 import { startServer } from './server/serve'
 import { loadConfig, ConfigError } from './core/config'
+import { handoffPath } from './core/paths'
 
 const argv = process.argv.slice(2)
 const cmd = argv[0] ?? 'serve'
@@ -74,8 +76,40 @@ switch (cmd) {
     }
     break
   }
+  case 'open': {
+    // `--print-url` is a BOOLEAN flag. The flag() helper above returns the NEXT
+    // argv element and is wrong for it; use argv.includes.
+    if (!argv.includes('--print-url')) {
+      // Actually launching a browser is a later plan's job. This slice ships
+      // exactly the one subcommand the handoff file needs a reader for.
+      console.error('atrium: usage: atrium open --print-url')
+      process.exit(64)   // EX_USAGE, matching the default case below
+    }
+    // READS the boot handoff; it does NOT mint. `handoffs` lives in the closure
+    // createAuth() builds inside startServer, so a separate process has no map
+    // to mint into. The only other exit would be an unauthenticated mint route,
+    // which would hand the session token to every local process.
+    const raw = (() => {
+      try { return readFileSync(handoffPath(), 'utf8') } catch { return undefined }
+    })()
+    if (raw === undefined) {
+      console.error('atrium: no handoff file found — is the server running? (start it with `atrium serve`)')
+      process.exit(69)   // EX_UNAVAILABLE
+    }
+    const h = JSON.parse(raw) as { token?: unknown; port?: unknown }
+    if (typeof h.token !== 'string' || typeof h.port !== 'number') {
+      console.error('atrium: handoff file is malformed; restart the server')
+      process.exit(69)
+    }
+    // The handoff rides in the FRAGMENT: a fragment is never sent to the server,
+    // never lands in an access log, and the page strips it from the address bar
+    // once it has redeemed it. stdout, never stderr — stderr is the journal
+    // under systemd, and this line is a credential.
+    console.log(`http://127.0.0.1:${h.port}/#${h.token}`)
+    break
+  }
   default:
     console.error(`atrium: unknown command "${cmd}"`)
-    console.error('usage: atrium serve [--port N]')
+    console.error('usage: atrium serve [--port N] | atrium open --print-url')
     process.exit(64)   // EX_USAGE
 }
