@@ -32,8 +32,18 @@ afterAll(() => { for (const d of made) rmSync(d, { recursive: true, force: true 
 // would stay green under the very mutation it exists to catch. Keeping all
 // eight scheduler-level tests on one shape is the cheaper half of that.
 //
-// CARRY-FORWARD for Task 5: this is an additional provider stub. When
-// `toClient` becomes a required contract member, this helper needs it too.
+// CARRY-FORWARD for Task 5 (expanded in fix round 1 / F15): this is an
+// additional provider stub — the FOURTH `Provider<…>`-typed factory under
+// test/, where Task 5's acceptance sentence says three. The others are
+// test/actions.test.ts, test/contract.test.ts and test/routes.test.ts; read
+// that sentence as four.
+//
+// When `toClient` becomes a required contract member this helper needs one too,
+// and the substantive rule is not merely "add the member": the added `toClient`
+// must be an EXPLICIT FIELD-BY-FIELD ALLOWLIST — never identity, never
+// `{ ...d }`. A spread satisfies any "toClient exists" check while shipping
+// every secret the provider holds, and the allowlist shape is the property
+// Task 5's M2 and Task 6's frame tests both depend on.
 const provider = (id: string, overrides: Partial<Provider<any, any>> = {}): Provider<any, any> => ({
   id,
   configSchema: { parse: (x: any) => x } as any,
