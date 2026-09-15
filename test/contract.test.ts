@@ -39,6 +39,60 @@ describe('registry', () => {
     r.register(mk('git'))
     expect(() => r.register(mk('obsidian'))).not.toThrow()
   })
+
+  // Three registration-time schedule rules. Each covers a shape that today
+  // fails SILENTLY at run time — no throw, no log, just a provider that does
+  // not do what it declared — so registration is the last place it can be
+  // caught where a caller is still on the stack.
+
+  test('rejects two schedules with the same name in one provider', () => {
+    const r = createRegistry()
+    const p = stub('fx', {
+      schedules: [
+        { name: 'poll', intervalMs: 1000, runOnStart: false },
+        { name: 'poll', intervalMs: 2000, runOnStart: false },
+      ],
+    })
+    // The two collide on the scheduler's providerId:scheduleName key, so they
+    // share previousByKey and inflight, while still registering two timers.
+    expect(() => r.register(p)).toThrow(/duplicate schedule name/i)
+  })
+
+  test('rejects an intervalMs that setInterval cannot honour', () => {
+    // 2_147_483_648 is the measured overflow case: on bun 1.3.11 setInterval
+    // warns TimeoutOverflowWarning, clamps the duration to 1 and fires 60
+    // times in 120ms, so a provider meaning "effectively never" gets a 1ms hot
+    // loop instead. The other three are rejected by Number.isInteger and the
+    // positivity check.
+    for (const intervalMs of [0, -1, 1.5, 2_147_483_648]) {
+      const r = createRegistry()
+      const p = stub('fx', { schedules: [{ name: 'poll', intervalMs, runOnStart: false }] })
+      expect(() => r.register(p)).toThrow(/positive integer <= 2147483647/)
+    }
+  })
+
+  test('rejects watch() declared with no schedules', () => {
+    const r = createRegistry()
+    // The scheduler's watch branch is guarded on schedules[0], so this
+    // provider's watcher would never be installed and it would sit inert.
+    const watching = stub('fx', { schedules: [], watch: () => ({ close() {} }) })
+    expect(() => r.register(watching)).toThrow(/watch\(\) but has no schedules/)
+
+    // The same empty-schedules shape with NO watch stays legal — it is exactly
+    // what test/routes.test.ts registers today.
+    expect(() => r.register(stub('routes-shape', { schedules: [] }))).not.toThrow()
+  })
+
+  test('a provider rejected for an invalid schedule is not registered', () => {
+    const r = createRegistry()
+    const p = stub('fx', { schedules: [{ name: 'poll', intervalMs: 0, runOnStart: false }] })
+    expect(() => r.register(p)).toThrow()
+    // Half-registration would be worse than the silent failure the rules
+    // exist to prevent: the provider would be serving /api/state and actions
+    // with a schedule the scheduler cannot honour.
+    expect(r.get('fx')).toBeUndefined()
+    expect(r.all()).toEqual([])
+  })
 })
 
 describe('scheduler', () => {
