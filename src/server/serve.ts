@@ -7,6 +7,7 @@ import { endpointPath, removeEndpointIfOwned, buildExecLine, currentExecContext 
 import { createRegistry } from '../core/registry'
 import { createScheduler } from '../core/scheduler'
 import { handleRoute, serveAsset } from './routes'
+import type { Provider } from '../core/contract'
 
 const SECURITY_HEADERS = (port: number) => ({
   'x-content-type-options': 'nosniff',
@@ -38,23 +39,29 @@ export interface ServeConfig {
   wsAuthTimeoutMs?: number
   /** Overrides process.env for endpoint.json placement; defaults to the real environment. */
   env?: NodeJS.ProcessEnv
+  /** Registered in array order, BEFORE the port binds. */
+  providers?: Provider<any, any>[]
+  /** Raw config record keyed by provider id; handed straight to createScheduler. */
+  config?: Record<string, unknown>
 }
 
 export async function startServer(cfg: ServeConfig) {
   const auth = createAuth()
-  // No providers are registered yet — Plan 2 (git/claude/obsidian/mail) is the
-  // consumer, and it CANNOT register one without changing this signature:
-  // the registry and the scheduler are both constructed here, reachable by
-  // nothing outside this function, and ServeConfig carries no registry,
-  // providers or config field. What is already live is everything downstream
-  // of them — /api/state and POST /api/actions/:providerId/:actionId serve
-  // whatever this registry holds, and a `call` action's cfg is read straight
-  // out of the scheduler's config — so Plan 2 widens the way the registry
-  // gets FILLED, not the routes. (Final review I5: the comment this replaces
-  // asserted the opposite, that a later task could just call
-  // registry.register(...) before startServer with no change here.)
+  // Providers are registered HERE, ABOVE the Bun.serve try/catch, and the
+  // position is load-bearing: registry.register throws on a duplicate provider
+  // id, a duplicate action id and an invalid schedule, and that throw has to
+  // escape startServer as a rejected promise with the port never bound and
+  // endpoint.json never written. It is deliberately outside the try below,
+  // which exists only to map EADDRINUSE to exit 78.
+  //
+  // Everything downstream of the registry was already live before this task:
+  // /api/state and POST /api/actions/:providerId/:actionId serve whatever this
+  // registry holds, and a `call` action's cfg is read straight out of the
+  // scheduler's config. So what changes here is how the registry gets FILLED,
+  // not the routes.
   const registry = createRegistry()
-  const scheduler = createScheduler(registry, { config: {} })
+  for (const p of cfg.providers ?? []) registry.register(p)
+  const scheduler = createScheduler(registry, { config: cfg.config ?? {} })
   const nonce = crypto.randomUUID()
   const startedAt = new Date().toISOString()
   const headers = SECURITY_HEADERS(cfg.port)
@@ -174,9 +181,19 @@ export async function startServer(cfg: ServeConfig) {
   writeFileSync(ep, JSON.stringify({ url: String(server.url), pid: process.pid, nonce, startedAt }), { mode: 0o600 })
 
   const cleanup = () => { removeEndpointIfOwned(ep, process.pid) }
+  // INVARIANT: scheduler.stop() runs BEFORE the server closes, everywhere this
+  // is used. The post-await abort guard in runNow is the only thing suppressing
+  // a notification after the server has gone away, so the scheduler has to be
+  // quiesced first — a listener firing into a closed server is a publish on a
+  // dead socket. (Not observable from this task: both calls are synchronous and
+  // land in the same tick, so nothing can resume between them. It becomes
+  // falsifiable once an onUpdate -> publish wire exists.)
+  const shutdown = () => { scheduler.stop(); cleanup() }
+  // Left as the bare cleanup on purpose: this is a last-resort unlink on a
+  // process that is already going away, not a lifecycle hook.
   process.on('exit', cleanup)
-  process.on('SIGTERM', () => { cleanup(); process.exit(0) })
-  process.on('SIGINT', () => { cleanup(); process.exit(0) })
+  process.on('SIGTERM', () => { shutdown(); process.exit(0) })
+  process.on('SIGINT', () => { shutdown(); process.exit(0) })
 
   // Also clean up on an explicit .stop() that doesn't exit the process — e.g.
   // every test in this suite. `process.on('exit', ...)` alone is not
@@ -185,9 +202,18 @@ export async function startServer(cfg: ServeConfig) {
   // left a stale endpoint.json under $XDG_RUNTIME_DIR after every `bun test`.
   const originalStop = server.stop.bind(server)
   server.stop = ((closeActiveConnections?: boolean) => {
-    cleanup()
+    shutdown()
     return originalStop(closeActiveConnections)
   }) as typeof server.stop
+
+  // Deliberately NOT awaited: a provider's runOnStart discovery pass must not
+  // delay startServer's resolution — endpoint.json is already written and
+  // /healthz is already answering. start() is specified never to reject, so
+  // the .catch is defence in depth against a future edit inside it rather than
+  // a live failure path.
+  // A later task inserts scheduler.onUpdate(...) -> server.publish here,
+  // BEFORE this line.
+  void scheduler.start().catch(() => {})
 
   return server
 }
