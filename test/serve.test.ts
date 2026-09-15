@@ -1,8 +1,8 @@
 import { test, expect, afterAll } from 'bun:test'
-import { mkdtempSync, mkdirSync, statSync, existsSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, statSync, existsSync, readFileSync, writeFileSync, chmodSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { startServer } from '../src/server/serve'
+import { startServer, BOOT_HANDOFF_TTL_MS } from '../src/server/serve'
 
 // bun's global WebSocket supports a non-standard second-arg `{ headers }` init
 // at runtime — the only way a non-browser client can set Origin on the
@@ -247,4 +247,307 @@ test('SIGINT removes endpoint.json on a real signal to a real process', async ()
   } finally {
     rmSync(scratch, { recursive: true, force: true })
   }
+})
+
+// --- Task 4: the auth round trip. ---
+//
+// Nothing in this repo had ever issued a session token, so no test had ever
+// sent a valid bearer or a valid socket auth frame. Measured on the 168-test
+// baseline immediately before these landed: `if (!auth.verifyBearer(req))`
+// mutated to `if (true)` — reject EVERY bearer — left the suite at 168 pass /
+// 0 fail, and `state.authed = true` mutated to `state.authed = false` did too.
+// The dangerous directions were already pinned; the HAPPY path was not, which
+// makes a change that breaks legitimate access invisible. That is an
+// availability regression gap, not an open security hole.
+//
+// Every server below gets a scratch XDG_RUNTIME_DIR so no test writes a live
+// credential into the developer's real runtime directory, and every POST sets
+// an explicit `origin` — measured: bun's fetch sends no Origin of its own, and
+// gate.ts 403s a non-read method that arrives without one, so a POST without it
+// never reaches the route at all.
+
+function runtimeScratch(): string {
+  return mkdtempSync(join(tmpdir(), 'atrium-handoff-'))
+}
+
+function readHandoffFile(scratch: string): { token: string; port: number; pid: number } {
+  return JSON.parse(readFileSync(join(scratch, 'atrium', 'handoff.json'), 'utf8'))
+}
+
+function redeem(port: number, handoff: unknown): Promise<Response> {
+  return fetch(`http://127.0.0.1:${port}/api/session`, {
+    method: 'POST',
+    headers: {
+      host: `127.0.0.1:${port}`,
+      origin: `http://127.0.0.1:${port}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ handoff }),
+  })
+}
+
+test('a handoff redeemed at POST /api/session returns a session token that is accepted by /api/state', async () => {
+  const scratch = runtimeScratch()
+  let s: Awaited<ReturnType<typeof startServer>> | undefined
+  try {
+    s = await startServer({ port: 7404, env: { XDG_RUNTIME_DIR: scratch } })
+    const res = await redeem(7404, readHandoffFile(scratch).token)
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(typeof body.token).toBe('string')
+
+    // THE assertion this whole task exists for. MUTATION: the bearer branch to
+    // `if (true)`. Nothing else in the suite presents a valid bearer, so
+    // without this line rejecting every legitimate client is invisible.
+    const state = await fetch('http://127.0.0.1:7404/api/state', {
+      headers: { host: '127.0.0.1:7404', authorization: `Bearer ${body.token}` },
+    })
+    expect(state.status).toBe(200)
+  } finally {
+    s?.stop()
+    rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+test('a socket that authenticates stays open and is not re-authenticated on later frames', async () => {
+  const scratch = runtimeScratch()
+  let s: Awaited<ReturnType<typeof startServer>> | undefined
+  let ws: WebSocket | undefined
+  try {
+    s = await startServer({ port: 7405, wsAuthTimeoutMs: 150, env: { XDG_RUNTIME_DIR: scratch } })
+    const token = (await (await redeem(7405, readHandoffFile(scratch).token)).json()).token
+
+    const closes: number[] = []
+    const sock = connectWs('ws://127.0.0.1:7405/ws', 'http://127.0.0.1:7405')
+    ws = sock
+    sock.addEventListener('close', (e) => closes.push(e.code))
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('timed out waiting for open')), 4000)
+      sock.addEventListener('open', () => { clearTimeout(timer); resolve() })
+      sock.addEventListener('error', () => { clearTimeout(timer); reject(new Error('socket errored before open')) })
+    })
+    sock.send(JSON.stringify({ type: 'auth', token }))
+
+    // THE SECOND FRAME IS THE TEST. The obvious version of this case — "auth,
+    // then assert the socket is still open past the 150ms window" — stays GREEN
+    // under the very mutation it is written for: with `state.authed = false`
+    // the handler still reaches clearTimeout(state.authTimer), so the timeout
+    // never fires and the socket never closes. With `authed` still false this
+    // second frame is read as another FIRST frame, fails authenticateSocket and
+    // closes 1008. Both assertions below must be present; this one is the test.
+    await Bun.sleep(50)
+    sock.send(JSON.stringify({ type: 'ping' }))
+    await Bun.sleep(600)   // comfortably past the 150ms auth window
+
+    expect(closes).toEqual([])
+    // toEqual ignores array sparseness and undefined entries (bun 1.3.11), so
+    // the length is pinned outright rather than inferred from the line above.
+    expect(closes.length).toBe(0)
+    expect(sock.readyState).toBe(1)   // WebSocket.OPEN — the literal, per connectWs's comment
+  } finally {
+    ws?.close()
+    s?.stop()
+    rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+test('the same handoff is refused on a second redemption', async () => {
+  const scratch = runtimeScratch()
+  let s: Awaited<ReturnType<typeof startServer>> | undefined
+  try {
+    s = await startServer({ port: 7406, env: { XDG_RUNTIME_DIR: scratch } })
+    const handoff = readHandoffFile(scratch).token
+
+    const first = await redeem(7406, handoff)
+    expect(first.status).toBe(200)
+    expect(typeof (await first.json()).token).toBe('string')
+
+    // MUTATION: delete `handoffs.delete(token)` from consumeHandoff.
+    const second = await redeem(7406, handoff)
+    expect(second.status).toBe(401)
+    expect(await second.text()).not.toContain('token')
+  } finally {
+    s?.stop()
+    rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+test('a GET to /api/session neither issues nor consumes', async () => {
+  const scratch = runtimeScratch()
+  let s: Awaited<ReturnType<typeof startServer>> | undefined
+  try {
+    s = await startServer({ port: 7407, env: { XDG_RUNTIME_DIR: scratch } })
+    const handoff = readHandoffFile(scratch).token
+
+    // The handoff is deliberately in the QUERY STRING, which §8.3 forbids
+    // precisely because a URL lands in logs and shell history. Without it this
+    // test is insensitive to the mutation it names: a GET-accepting route that
+    // still read only the body would 401 anyway, since req.json() throws on a
+    // bodyless GET. MUTATION: drop the `&& req.method === 'POST'` guard AND
+    // source the handoff from searchParams.
+    const get = await fetch(`http://127.0.0.1:7407/api/session?handoff=${handoff}`, {
+      headers: { host: '127.0.0.1:7407' },
+    })
+    expect(get.status).toBe(401)
+    expect(await get.text()).not.toContain('token')
+
+    // Proof the GET consumed nothing: the handoff is still good.
+    expect((await redeem(7407, handoff)).status).toBe(200)
+  } finally {
+    s?.stop()
+    rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+test('POST /api/session with no Origin header is rejected by the gate before the route runs', async () => {
+  const scratch = runtimeScratch()
+  let s: Awaited<ReturnType<typeof startServer>> | undefined
+  try {
+    s = await startServer({ port: 7408, env: { XDG_RUNTIME_DIR: scratch } })
+    const handoff = readHandoffFile(scratch).token
+
+    const noOrigin = await fetch('http://127.0.0.1:7408/api/session', {
+      method: 'POST',
+      headers: { host: '127.0.0.1:7408' },   // measured: bun's fetch adds no Origin of its own
+      body: JSON.stringify({ handoff }),
+    })
+    // 403 is the GATE's answer, not the route's 401. MUTATION: hoist the
+    // /api/session block above the checkRequest call and this becomes 200.
+    expect(noOrigin.status).toBe(403)
+
+    // The route never ran, so the handoff was never consumed.
+    expect((await redeem(7408, handoff)).status).toBe(200)
+  } finally {
+    s?.stop()
+    rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+test('handoff.json is 0600 even when it pre-existed looser, and holds the handoff, never the session token', async () => {
+  const scratch = runtimeScratch()
+  let s: Awaited<ReturnType<typeof startServer>> | undefined
+  try {
+    const dir = join(scratch, 'atrium')
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
+    const hp = join(dir, 'handoff.json')
+    writeFileSync(hp, '{}')
+    chmodSync(hp, 0o644)
+    expect(statSync(hp).mode & 0o777).toBe(0o644)   // sanity: the pre-existing looser mode took
+
+    s = await startServer({ port: 7409, env: { XDG_RUNTIME_DIR: scratch } })
+
+    // MUTATION: delete chmodSync(hp, 0o600) from startServer. Measured on bun
+    // 1.3.11: writeFileSync's `mode` applies only when it CREATES the file, so
+    // rewriting this one with { mode: 0o600 } leaves it at 0644.
+    expect(statSync(hp).mode & 0o777).toBe(0o600)
+
+    const written = readHandoffFile(scratch)
+    expect(written.pid).toBe(process.pid)
+    expect(written.port).toBe(7409)
+    expect(written.token).toMatch(/^[A-Za-z0-9_-]{43}$/)
+
+    const body = await (await redeem(7409, written.token)).json()
+    expect(typeof body.token).toBe('string')
+    // The file holds the HANDOFF, never the session token. Both are 43-char
+    // base64url, so the regex above cannot tell them apart — this is what does.
+    // MUTATION: write auth.sessionToken into handoff.json instead of the mint.
+    expect(written.token).not.toBe(body.token)
+  } finally {
+    s?.stop()
+    rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+test('stop() removes handoff.json as well as endpoint.json', async () => {
+  const scratch = runtimeScratch()
+  let s: Awaited<ReturnType<typeof startServer>> | undefined
+  let stopped = false
+  try {
+    s = await startServer({ port: 7410, env: { XDG_RUNTIME_DIR: scratch } })
+    const hp = join(scratch, 'atrium', 'handoff.json')
+    const ep = join(scratch, 'atrium', 'endpoint.json')
+    expect(existsSync(hp)).toBe(true)
+    expect(existsSync(ep)).toBe(true)
+
+    s.stop()
+    stopped = true
+
+    expect(existsSync(ep)).toBe(false)
+    // MUTATION: drop removeEndpointIfOwned(hp, process.pid) from cleanup. A
+    // credential left behind by every clean shutdown is the failure this pins.
+    expect(existsSync(hp)).toBe(false)
+  } finally {
+    if (!stopped) s?.stop()
+    rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+test('atrium open --print-url prints the boot handoff from the file and does not mint a new one', async () => {
+  const scratch = runtimeScratch()
+  const hp = join(scratch, 'atrium', 'handoff.json')
+  const env = { ...process.env, XDG_RUNTIME_DIR: scratch, XDG_CONFIG_HOME: emptyConfigHome() }
+  const proc = Bun.spawn(
+    [process.execPath, 'run', 'src/index.ts', 'serve', '--port', '7411'],
+    { env, stderr: 'pipe', stdout: 'pipe' },
+  )
+  try {
+    expect(await waitForFile(hp)).toBe(true)
+    const before = readHandoffFile(scratch).token
+
+    const open = Bun.spawn(
+      [process.execPath, 'run', 'src/index.ts', 'open', '--print-url'],
+      { env, stderr: 'pipe', stdout: 'pipe' },
+    )
+    const out = await new Response(open.stdout).text()
+    expect(await open.exited).toBe(0)
+    // MUTATION: mint a fresh token in `case 'open'` instead of printing the
+    // file's. The token is the whole of the URL that matters.
+    expect(out.trim()).toBe(`http://127.0.0.1:7411/#${before}`)
+
+    // `open` READS. The handoff map lives in createAuth's closure inside the
+    // SERVER process, so a second process has nothing to mint into; this pins
+    // that the reader did not grow a writer.
+    expect(readHandoffFile(scratch).token).toBe(before)
+  } finally {
+    proc.kill()
+    await proc.exited   // never leave a server squatting machine-global 7411
+    rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+test('atrium open fails cleanly with no server and with no --print-url', async () => {
+  const scratch = runtimeScratch()   // deliberately empty: no server ever started here
+  const env = { ...process.env, XDG_RUNTIME_DIR: scratch, XDG_CONFIG_HOME: emptyConfigHome() }
+  try {
+    const missing = Bun.spawn(
+      [process.execPath, 'run', 'src/index.ts', 'open', '--print-url'],
+      { env, stderr: 'pipe', stdout: 'pipe' },
+    )
+    const missingOut = await new Response(missing.stdout).text()
+    const missingErr = await new Response(missing.stderr).text()
+    expect(await missing.exited).toBe(69)          // EX_UNAVAILABLE
+    expect(missingErr).toContain('server')
+    expect(missingOut).toBe('')                    // nothing to paste into a browser
+
+    const noFlag = Bun.spawn(
+      [process.execPath, 'run', 'src/index.ts', 'open'],
+      { env, stderr: 'pipe', stdout: 'pipe' },
+    )
+    const noFlagOut = await new Response(noFlag.stdout).text()
+    const noFlagErr = await new Response(noFlag.stderr).text()
+    expect(await noFlag.exited).toBe(64)           // EX_USAGE
+    expect(noFlagErr).toContain('usage')
+    expect(noFlagOut).toBe('')
+  } finally {
+    rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+// TRIPWIRE, NOT COVERAGE. This can only fail if someone edits the constant. It
+// exists because the tempting tidy-up is to drop mintHandoff's second argument
+// and inherit createAuth's 60s default, which strands every systemd-started
+// user — their handoff is dead before they reach a browser — and nothing else
+// in the suite would notice.
+test('the boot handoff TTL is long, per the recorded ruling', () => {
+  expect(BOOT_HANDOFF_TTL_MS).toBeGreaterThanOrEqual(24 * 60 * 60 * 1000)
 })
