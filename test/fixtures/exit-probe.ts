@@ -13,4 +13,9 @@ const p = makeFixtureProvider({ schedules: [{ name: 'poll', intervalMs: 20, runO
 
 const s = await startServer({ port, providers: [p], config: { fx: {} } })
 await Bun.sleep(100)
+// Printed so the parent can tell "exited because stop() cleaned up after a
+// running scheduler" from "exited because nothing was ever scheduled". Without
+// it, deleting `void scheduler.start()` from serve.ts makes this child exit 0
+// trivially and the parent's assertion proves nothing.
+console.log(`fetches=${p.fetchCount}`)
 s.stop()

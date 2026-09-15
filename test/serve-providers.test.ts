@@ -102,6 +102,12 @@ test('a process with a registered provider exits after stop()', async () => {
       throw new Error('exit-probe was still alive after 5s — something is keeping the loop alive')
     }
     expect(code).toBe(0)
+    // Not decoration: exit 0 alone is also what a child that never started the
+    // scheduler produces, so on its own this test would pass under a serve.ts
+    // that dropped `void scheduler.start()`. The count is what makes the name
+    // ("a process WITH A REGISTERED PROVIDER exits") true.
+    const out = await new Response(proc.stdout).text()
+    expect(out).toMatch(/fetches=[1-9]/)
   } finally {
     rmSync(scratch, { recursive: true, force: true })
   }
