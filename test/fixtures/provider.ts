@@ -43,7 +43,12 @@ export interface FixtureProviderOptions<Data = unknown> {
 export interface FixtureProvider<Data = unknown> extends Provider<any, Data> {
   /** Calls the scheduler's emit callback. Throws if watch() is not installed. */
   emit(): void
-  /** What the next default fetch() resolves to. */
+  /**
+   * What the next DEFAULT fetch() resolves to. THROWS when opts.fetch was
+   * supplied, because opts.fetch wins unconditionally and this would otherwise
+   * be a silent no-op — the exact flake this fixture's doc comment above
+   * promises not to have. Use one or the other, never both.
+   */
   setData(d: Data): void
   /**
    * What toClient() returns next, INCLUDING a value JSON.stringify throws on
@@ -59,7 +64,7 @@ export interface FixtureProvider<Data = unknown> extends Provider<any, Data> {
   countFor(scheduleName: string): number
   /** How many times the scheduler called watch(). */
   readonly watchCalls: number
-  /** True once watch() has returned a Disposable. */
+  /** True once watch() has returned a Disposable; false again once it is closed. */
   readonly watchInstalled: boolean
   /** How many times the returned Disposable was closed. */
   readonly closeCalls: number
@@ -108,7 +113,16 @@ export function makeFixtureProvider<Data = unknown>(
       emitFn()
     },
 
-    setData(d: Data) { data = d; hasData = true },
+    setData(d: Data) {
+      if (opts.fetch) {
+        throw new Error(
+          `fixture provider "${id}": setData() has no effect because opts.fetch was supplied — ` +
+          'opts.fetch wins unconditionally. Supply one or the other, not both.',
+        )
+      }
+      data = d
+      hasData = true
+    },
     setWire(v: unknown) { wire = v; hasWire = true },
 
     async waitForWatch(timeoutMs = 1000): Promise<void> {
@@ -137,7 +151,13 @@ export function makeFixtureProvider<Data = unknown>(
       watchCalls++
       if (opts.watchThrows !== undefined) throw new Error(opts.watchThrows)
       emitFn = emit
-      return { close() { closeCalls++ } }
+      // Clearing emitFn is what makes watchInstalled track reality across a
+      // stop()/start() cycle. Without it the fixture reports a watcher as
+      // installed after the scheduler tore it down, and a later task's
+      // restart test would assert against a stale true — or worse, emit()
+      // would push into a scheduler that has already stopped instead of
+      // throwing.
+      return { close() { closeCalls++; emitFn = undefined } }
     }
   }
 

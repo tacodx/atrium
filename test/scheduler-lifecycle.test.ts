@@ -286,6 +286,10 @@ test('stop() closes every installed watcher', async () => {
   s.stop()
 
   expect(p.closeCalls).toBe(1)
+  // And the fixture stops claiming the watcher is installed once it is closed.
+  // A stale `true` here would make a later task's stop/start test assert
+  // against state the scheduler had already torn down.
+  expect(p.watchInstalled).toBe(false)
 })
 
 test('a watch emit routes into the first declared schedule', async () => {
@@ -336,4 +340,10 @@ test('the fixture seam: setData feeds fetch, setWire overrides toClient, and the
   p.setWire(circular)
   expect(p.toClient({ ok: true })).toBe(circular)
   expect(() => JSON.stringify(p.toClient({ ok: true }))).toThrow()
+
+  // opts.fetch wins over setData unconditionally, so setData on a provider
+  // built with one used to be a SILENT no-op — a later task would have watched
+  // its seeded value never arrive and had no idea why. It is now loud.
+  const withFetch = makeFixtureProvider<{ ok: boolean }>({ fetch: async () => ({ ok: true }) })
+  expect(() => withFetch.setData({ ok: false })).toThrow(/opts\.fetch wins unconditionally/)
 })
