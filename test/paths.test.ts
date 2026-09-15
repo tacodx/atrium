@@ -1,8 +1,8 @@
 import { test, expect, describe } from 'bun:test'
 import { mkdtempSync, writeFileSync, existsSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
-import { buildExecLine, isCompiledPath, removeEndpointIfOwned } from '../src/core/paths'
+import { buildExecLine, isCompiledPath, removeEndpointIfOwned, endpointPath, handoffPath } from '../src/core/paths'
 
 test('a compiled binary uses its own absolute path', () => {
   const line = buildExecLine({ isCompiled: true, execPath: '/usr/local/bin/atrium', mainPath: '/$bunfs/root/index.ts' })
@@ -33,6 +33,30 @@ describe('isCompiledPath', () => {
 
   test('recognizes an ordinary absolute path as not compiled', () => {
     expect(isCompiledPath('/home/u/atrium/src/index.ts')).toBe(false)
+  })
+})
+
+// The boot handoff must land in the ONE directory startServer chmods to 0700
+// on every boot. `~/.config` itself is 0755 (§8.5), so "next to endpoint.json"
+// is not a tidiness preference — it is the whole of the file's protection.
+//
+// Synthetic env objects only: the plan forbids any assertion derived from
+// $HOME, and the mutation these guard against (`handoffPath` ignoring
+// XDG_RUNTIME_DIR and resolving through configDir) would otherwise make the
+// expected value depend on the developer's home directory.
+describe('handoffPath', () => {
+  test('handoffPath and endpointPath are siblings in the runtime directory', () => {
+    const env = { XDG_RUNTIME_DIR: '/run/user/1000' } as NodeJS.ProcessEnv
+    expect(handoffPath(env)).toBe('/run/user/1000/atrium/handoff.json')
+    // MUTATION: `handoffPath` returning join(configDir(env), 'handoff.json')
+    // unconditionally turns both of these red.
+    expect(dirname(handoffPath(env))).toBe(dirname(endpointPath(env)))
+  })
+
+  test('handoffPath falls back to the config dir when XDG_RUNTIME_DIR is unset', () => {
+    const env = { XDG_CONFIG_HOME: '/home/u/.config' } as NodeJS.ProcessEnv
+    expect(handoffPath(env)).toBe('/home/u/.config/atrium/handoff.json')
+    expect(dirname(handoffPath(env))).toBe(dirname(endpointPath(env)))
   })
 })
 

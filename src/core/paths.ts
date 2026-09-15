@@ -37,9 +37,28 @@ export function configDir(env = process.env): string {
 // instance is intended to be caught by a future consumer (`atrium open` /
 // `doctor`) checking whether `pid` is still alive — that consumer does not
 // exist yet, so treat this as documented future work, not present behavior.
+//
+// Extracted from endpointPath so every runtime file is a sibling BY
+// CONSTRUCTION rather than by two copies of the same expression agreeing.
+// startServer chmods this one directory to 0700 on every boot; anything that
+// resolves through here inherits that, and anything that does not, does not.
+export function runtimeDir(env = process.env): string {
+  return env.XDG_RUNTIME_DIR ? join(env.XDG_RUNTIME_DIR, 'atrium') : configDir(env)
+}
+
 export function endpointPath(env = process.env): string {
-  const base = env.XDG_RUNTIME_DIR ? join(env.XDG_RUNTIME_DIR, 'atrium') : configDir(env)
-  return join(base, 'endpoint.json')
+  return join(runtimeDir(env), 'endpoint.json')
+}
+
+/**
+ * The boot handoff. A SEPARATE file, never endpoint.json: §9 fixes that file's
+ * shape as {url, pid, startedAt} and its `nonce` is already echoed on the
+ * unauthenticated /healthz route, so nothing in it is treated as secret.
+ * Sibling-by-construction so it inherits the 0700 directory startServer
+ * asserts on every boot.
+ */
+export function handoffPath(env = process.env): string {
+  return join(runtimeDir(env), 'handoff.json')
 }
 
 /**
@@ -53,6 +72,9 @@ export function endpointPath(env = process.env): string {
  * A missing file, an unreadable/unparsable one, or one with no numeric `pid`
  * are all treated the same as "not ours": nothing to remove, nothing to
  * throw about.
+ *
+ * File-agnostic on purpose — it reads only the recorded `.pid` — so it is the
+ * remover for `handoff.json` as well as `endpoint.json`.
  *
  * Returns whether a removal happened, for testability.
  */
