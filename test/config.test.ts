@@ -57,12 +57,22 @@ const PARSED = { staleDays: 14, marker: 'PARSED' }
 describe('loadConfig', () => {
   test('a missing config.json yields an empty object, not a throw', () => {
     const env = scratchConfig()                       // dir created, no file written
-    expect(loadConfig(env)).toEqual({})
+    const cfg = loadConfig(env)
+    expect(cfg).toEqual({})
+    // The freeze is asserted HERE and not only in Test 5, because Test 5 covers
+    // the PARSED-value return while these two cover the early returns. The
+    // brief's M8 mutates all three at once and so is caught by Test 5 alone;
+    // narrowed to just the ENOENT and empty-file arms it left the whole suite
+    // green — measured, fix round 1 / F9. A missing config file is the
+    // documented normal first-run state, so this is the COMMON path.
+    expect(Object.isFrozen(cfg)).toBe(true)
   })
 
   test('an empty or whitespace-only config.json yields an empty object', () => {
     for (const contents of ['', '  \n ']) {
-      expect(loadConfig(scratchConfig(contents))).toEqual({})
+      const cfg = loadConfig(scratchConfig(contents))
+      expect(cfg).toEqual({})
+      expect(Object.isFrozen(cfg)).toBe(true)          // same narrowed-M8 witness as above
     }
   })
 
@@ -94,11 +104,29 @@ describe('loadConfig', () => {
     expect(() => loadConfig(env)).toThrow(path)
   })
 
-  test('a non-object top level throws ConfigError', () => {
-    for (const contents of ['[]', '"nope"', 'null', '42', 'true']) {
+  // RENAMED in fix round 1 (was 'a non-object top level throws ConfigError'):
+  // the `got X` half is now asserted, so the title says so. Still the test the
+  // brief's M10 row names (Test 4).
+  test('a non-object top level throws ConfigError naming what it got instead', () => {
+    // The `got X` suffix is asserted, not just the sentence in front of it.
+    // `describe()` has its own `Array.isArray -> 'an array'` and
+    // `=== null -> 'null'` arms precisely because `typeof [] === 'object'` and
+    // `typeof null === 'object'`, and those two arms are the two that silently
+    // degrade: replacing describe()'s whole body with `return typeof value`
+    // turns "[]" into "got object" and "null" into "got object" and left the
+    // WHOLE suite green — measured, fix round 1 / NF1. Asserting only
+    // /must contain a JSON object/ cannot see that.
+    const cases = [
+      ['[]', 'an array'],
+      ['"nope"', 'string'],
+      ['null', 'null'],
+      ['42', 'number'],
+      ['true', 'boolean'],
+    ] as const
+    for (const [contents, described] of cases) {
       const env = scratchConfig(contents)
       expect(() => loadConfig(env)).toThrow(ConfigError)
-      expect(() => loadConfig(env)).toThrow(/must contain a JSON object/)
+      expect(() => loadConfig(env)).toThrow(`must contain a JSON object at the top level, got ${described}`)
     }
   })
 
