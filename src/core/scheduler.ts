@@ -1,5 +1,6 @@
 import type { Registry } from './registry'
 import type { Disposable } from './contract'
+import { ConfigError } from './config'
 
 /**
  * Per-schedule health. Lives here rather than in contract.ts because a
@@ -19,7 +20,7 @@ export interface ProviderStatus {
   schedules: Record<string, ScheduleHealth>   // schedule name -> that schedule's health
 }
 
-export function createScheduler(registry: Registry, opts: { config: Record<string, unknown> }) {
+export function createScheduler(registry: Registry, opts: { config: Readonly<Record<string, unknown>> }) {
   const last = new Map<string, unknown>()          // providerId -> last Data (display value for snapshot()/onUpdate — whichever schedule most recently produced data)
   const previousByKey = new Map<string, unknown>() // `${providerId}:${scheduleName}` -> that schedule's own last Data (feeds ctx.previous — never another schedule's output)
   const inflight = new Map<string, Promise<unknown>>()
@@ -37,6 +38,52 @@ export function createScheduler(registry: Registry, opts: { config: Record<strin
   // and watchers; the `started` boolean alone cannot see that, because the
   // replacing start() has already set it back to true.
   let generation = 0
+
+  // The ONE parse site in the system. It is here, not in startServer's
+  // config-loading path, because every direct createScheduler caller —
+  // test/contract.test.ts and every provider unit test — would otherwise
+  // run on unparsed config while production runs parsed. It is at
+  // construction, not lazily on first fetch, because start()'s poll path
+  // swallows rejections: a lazy parse turns a bad config into a silently
+  // failing provider instead of a startup failure the CLI can exit 78 on.
+  //
+  // Note what this does for a provider with NO section in the file: it still
+  // calls parse(undefined), so a schema that supplies defaults gets the chance
+  // to. There is deliberately no `if (opts.config[p.id] === undefined) continue`
+  // guard — that is the exact shape of the silent-default defect this plan is
+  // written against (a `repos.staleDays` lookup that is always undefined and
+  // always falls back to 30 without anyone noticing).
+  //
+  // Synchronous on purpose, and the whole body of createScheduler must stay
+  // that way: start()'s pre-installSources() generation guard is documented as
+  // dead code precisely because there is no await between the runOnStart pass
+  // and installSources(). Making parsing async would make that guard live and
+  // it would then need its own test.
+  const parsed = new Map<string, unknown>()
+  for (const p of registry.all()) {
+    try {
+      parsed.set(p.id, p.configSchema.parse(opts.config[p.id]))
+    } catch (cause) {
+      throw new ConfigError(`invalid config for provider "${p.id}"`, { cause })
+    }
+  }
+
+  /** The one read path for a provider's config. Serves the PARSED value. */
+  function cfgFor(providerId: string): unknown {
+    if (parsed.has(providerId)) return parsed.get(providerId)
+    // A provider present in the registry but absent from `parsed` was
+    // registered after construction, so its config was never parsed.
+    // Serving the raw value here would be the silent half-parsed state
+    // this task exists to make impossible.
+    if (registry.get(providerId)) {
+      throw new Error(
+        `provider "${providerId}" was registered after the scheduler was constructed; its config was never parsed`,
+      )
+    }
+    // A config section with no provider: the action layer and tests read
+    // these, and they have never been parseable by anyone.
+    return opts.config[providerId]
+  }
 
   function healthFor(providerId: string, scheduleName: string): ScheduleHealth {
     let perSchedule = health.get(providerId)
@@ -131,7 +178,7 @@ export function createScheduler(registry: Registry, opts: { config: Record<strin
     controllers.add(ac)
     const run = (async () => {
       try {
-        const data = await p.fetch(opts.config[providerId] as never, {
+        const data = await p.fetch(cfgFor(providerId) as never, {
           schedule: scheduleName,
           previous: previousByKey.get(key),
           signal: ac.signal,
@@ -188,7 +235,7 @@ export function createScheduler(registry: Registry, opts: { config: Record<strin
       const fallback = p.schedules[0]
       if (p.watch && fallback) {
         try {
-          watchers.push(p.watch(opts.config[p.id] as never, () => void runNow(p.id, fallback.name).catch(() => {})))
+          watchers.push(p.watch(cfgFor(p.id) as never, () => void runNow(p.id, fallback.name).catch(() => {})))
         } catch (e) {
           // A watcher that throws on installation must not escape start(), and
           // therefore must not escape startServer() after the port is already
@@ -209,12 +256,16 @@ export function createScheduler(registry: Registry, opts: { config: Record<strin
     /**
      * The one config holder in the system, so it is also the one place the
      * action layer can get a provider's config from. `fetch` already receives
-     * `opts.config[providerId]`; before this existed, `dispatch` had no path
-     * to the same value and passed `undefined` to every `call` action's
+     * `cfgFor(providerId)`; before this existed, `dispatch` had no path to the
+     * same value and passed `undefined` to every `call` action's
      * `run(target, cfg)` — unimplementable for all four `call` actions the
-     * spec plans. Same lookup, same value, one accessor.
+     * spec plans. Same accessor, same value.
+     *
+     * That value is the PARSED one, snapshotted at construction. The raw
+     * record is reachable only through cfgFor's last fallback, for a config
+     * section that has no registered provider to parse it.
      */
-    configFor: (providerId: string): unknown => opts.config[providerId],
+    configFor: (providerId: string): unknown => cfgFor(providerId),
 
     /**
      * Specified to NEVER reject. Four properties, each separately pinned by a
