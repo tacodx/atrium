@@ -1,6 +1,6 @@
 import { test, expect } from 'bun:test'
 import { createRegistry } from '../src/core/registry'
-import { createScheduler } from '../src/core/scheduler'
+import { createScheduler, type ProviderStatus } from '../src/core/scheduler'
 import { makeFixtureProvider, type FixtureProvider } from './fixtures/provider'
 
 function schedulerFor(p: FixtureProvider<any>) {
@@ -168,6 +168,39 @@ test('consecutive failures accumulate and a success clears the record', async ()
   expect(typeof h?.lastSuccessAt).toBe('number')
   expect(h?.lastSuccessAt ?? 0).toBeGreaterThan(0)
   expect(s.snapshot().fx?.data).toEqual(payload)
+})
+
+test('onUpdate carries the status envelope, and the record is current when it fires', async () => {
+  // onUpdate's payload is the only input a later task's `onUpdate -> publish`
+  // wire has, and the only thing the UI renders from. Nothing else in the
+  // suite registers a listener that inspects its second argument, so all
+  // three of "payload reverted to bare Data", "notify() before
+  // recordSuccess()" and "failure arm does not notify" would ship green.
+  let fail = true
+  const payload = { v: 42 }
+  const p = makeFixtureProvider({ fetch: async () => { if (fail) throw new Error('boom'); return payload } })
+  const s = schedulerFor(p)
+
+  const seen: Array<[string, ProviderStatus]> = []
+  s.onUpdate((id, status) => seen.push([id, structuredClone(status)]))
+
+  await s.runNow('fx', 'poll').catch(() => {})     // the failure arm notifies too
+  expect(seen.length).toBe(1)
+  expect(seen[0]![0]).toBe('fx')
+  expect(seen[0]![1].data).toBeUndefined()
+  expect(seen[0]![1].schedules.poll).toEqual({
+    lastSuccessAt: null, consecutiveFailures: 1, lastErrorMessage: 'boom',
+  })
+
+  fail = false
+  await s.runNow('fx', 'poll')
+  expect(seen.length).toBe(2)
+  expect(seen[1]![1].data).toEqual(payload)
+  // Fires AFTER recordSuccess: a listener must never see fresh data beside a
+  // stale error message — that ambiguity is the whole reason the record is
+  // cleared on success, and the snapshot() boundary alone does not pin it.
+  expect(seen[1]![1].schedules.poll!.consecutiveFailures).toBe(0)
+  expect(seen[1]![1].schedules.poll!.lastErrorMessage).toBeNull()
 })
 
 test('a run aborted by stop() is not counted as a failure', async () => {
