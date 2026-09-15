@@ -1,5 +1,6 @@
-import { readdirSync, statSync, renameSync, existsSync } from 'node:fs'
+import { readdirSync, statSync, renameSync, existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+import { tmpdir } from 'node:os'
 
 // Resolved to an absolute path: Bun.spawn resolves a relative executable path
 // against the CHILD's cwd (set below to a foreign directory), not the caller's,
@@ -30,8 +31,24 @@ let embedded = 0
 let cssHref: string | undefined
 let jsSrc: string | undefined
 
+// XDG_CONFIG_HOME is scoped to an empty scratch dir, mirroring
+// test/serve.test.ts's `emptyConfigHome` helper. As of Task 3 the binary loads
+// $XDG_CONFIG_HOME/atrium/config.json on `serve`, and this spawn passed no
+// `env`, so the child inherited the OPERATOR'S real config. That is latent
+// today — ~/.config/atrium does not exist, so loadConfig takes its ENOENT path
+// — and goes live at Task 7's strict `repos` schema: one schema-rejected key in
+// a personal config file would make the binary exit 78 before binding, and this
+// script would then report "binary never started listening within 5s",
+// pointing at DCE and route wiring rather than at the operator's dotfile.
+const configHome = mkdtempSync(join(tmpdir(), 'atrium-assert-config-'))
+
 try {
-  const proc = Bun.spawn([BIN, 'serve', '--port', '7373'], { cwd: '/tmp', stdout: 'pipe', stderr: 'pipe' })
+  const proc = Bun.spawn([BIN, 'serve', '--port', '7373'], {
+    cwd: '/tmp',
+    env: { ...process.env, XDG_CONFIG_HOME: configHome },
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
 
   // Poll, never sleep a fixed amount: a fixed wait is flaky on a loaded box
   // and slow on an idle one. /healthz needs the `host` header the gate
@@ -51,6 +68,7 @@ try {
     // web-dist permanently renamed and the child process orphaned.
     proc.kill()
     if (existsSync(parked)) renameSync(parked, DIST)
+    rmSync(configHome, { recursive: true, force: true })
     process.exit(1)
   }
 
@@ -129,6 +147,7 @@ try {
   proc.kill()
 } finally {
   if (existsSync(parked)) renameSync(parked, DIST)
+  rmSync(configHome, { recursive: true, force: true })
 }
 
 if (failures.length) {
