@@ -193,9 +193,16 @@ describe('createScheduler config parsing', () => {
     }))
 
     const s = createScheduler(r, { config: {} })          // no `repos` key at all
-    await s.runNow('repos', 'poll')
 
+    // ASSERTED BEFORE any runNow, deliberately. After a runNow, a mutation
+    // that skips the parse reddens this test through cfgFor's
+    // registered-after-construction throw instead — which is a DIFFERENT
+    // property's mutation, and would leave the parse call itself unpinned.
+    // Measured: with this assertion below the runNow, the skip-undefined
+    // mutation never reaches it.
     expect(parseArgs).toEqual([undefined])                // called ONCE, with undefined
+
+    await s.runNow('repos', 'poll')
     expect(sawInFetch).toEqual({ staleDays: 30 })
     expect(s.configFor('repos')).toEqual({ staleDays: 30 })
   })
