@@ -1,5 +1,5 @@
 import { test, expect, describe, afterAll } from 'bun:test'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { loadConfig, configFilePath, ConfigError, CONFIG_FILENAME } from '../src/core/config'
@@ -497,6 +497,117 @@ describe('config reaches the server', () => {
     }
   })
 
+  // --- ADDED in fix round 1 (F12): the config file's `port` key. ---
+  //
+  // src/server/serve.ts's EADDRINUSE branch prints "Change it with the "port"
+  // key in your config, or free the port." That sentence is live and
+  // test-pinned (deleting the console.error reddens
+  // test/serve.test.ts's 'a port collision exits 78, not a restart loop'), and
+  // before this round the advice it gives was INERT: measured end to end, a
+  // scratch config containing {"port": 7999} with no --port flag was accepted
+  // verbatim by loadConfig, read by nothing, and the server bound 7373 with
+  // nothing on stderr. A user following Atrium's own instruction walked into
+  // the plan's silent-default failure shape (ADR 0002 ruling C).
+  //
+  // These three children spawn the real entry point, because the resolution
+  // lives in src/index.ts's argv handling and has no in-process seam.
+  // XDG_RUNTIME_DIR is scoped to the same scratch dir, so endpoint.json — the
+  // observable below — is private to the test and never the developer's real
+  // runtime dir.
+
+  async function waitForEndpoint(dir: string): Promise<Record<string, unknown> | undefined> {
+    const epPath = join(dir, 'atrium', 'endpoint.json')
+    // 3s, NOT 5s: bun's own per-test timeout is 5000ms, so a 5s guard here
+    // ties with it and bun's anonymous "timed out after 5000ms" wins the race
+    // instead of this file's named diagnostic. Measured under the F12-a
+    // mutation in fix round 1.
+    const deadline = Date.now() + 3000
+    while (Date.now() < deadline) {
+      if (existsSync(epPath)) return JSON.parse(readFileSync(epPath, 'utf8'))
+      await Bun.sleep(50)
+    }
+    return undefined
+  }
+
+  test('the config file\'s "port" key is what binds when no --port is given', async () => {
+    // MUTATION THIS PINS: delete the `Object.hasOwn(config, 'port')` arm from
+    // resolvePort so it always returns DEFAULT_PORT — i.e. restore the
+    // pre-fix-round behaviour. The child then binds 7373 and the url assertion
+    // below reddens.
+    const env = scratchConfig('{"port":7425}')
+    const dir = env.XDG_CONFIG_HOME!
+
+    const proc = Bun.spawn(
+      [process.execPath, 'run', 'src/index.ts', 'serve'],          // deliberately NO --port
+      { env: { ...process.env, XDG_CONFIG_HOME: dir, XDG_RUNTIME_DIR: dir }, stderr: 'pipe', stdout: 'pipe' },
+    )
+    try {
+      const written = await waitForEndpoint(dir)
+      // endpoint.json records the URL the server ACTUALLY bound, so this reads
+      // the real bind rather than inferring it from a successful fetch.
+      expect(written).toBeDefined()
+      expect(String(written!.url)).toContain('7425')
+      expect(String(written!.url)).not.toContain('7373')            // not the silent default
+    } finally {
+      proc.kill('SIGKILL')
+      await proc.exited
+    }
+  })
+
+  test('--port still wins over the config file\'s "port"', async () => {
+    // MUTATION THIS PINS: reverse the precedence in resolvePort (check the
+    // config key before the flag). Every OTHER spawn test in the suite passes
+    // --port against an EMPTY config, so none of them can see it.
+    const env = scratchConfig('{"port":7425}')
+    const dir = env.XDG_CONFIG_HOME!
+
+    const proc = Bun.spawn(
+      [process.execPath, 'run', 'src/index.ts', 'serve', '--port', '7426'],
+      { env: { ...process.env, XDG_CONFIG_HOME: dir, XDG_RUNTIME_DIR: dir }, stderr: 'pipe', stdout: 'pipe' },
+    )
+    try {
+      const written = await waitForEndpoint(dir)
+      expect(written).toBeDefined()
+      expect(String(written!.url)).toContain('7426')
+      expect(String(written!.url)).not.toContain('7425')
+    } finally {
+      proc.kill('SIGKILL')
+      await proc.exited
+    }
+  })
+
+  test('a nonsense "port" in the config exits 78 rather than silently rebinding the default', async () => {
+    // MUTATION THIS PINS: make resolvePort fall back on a bad value —
+    // `return typeof raw === 'number' ? raw : DEFAULT_PORT`, or the more
+    // tempting `Number(raw) || DEFAULT_PORT`. Under either, the child starts
+    // happily on 7373 and runs forever; the guard below turns that into a named
+    // failure instead of a bun timeout with a live server left holding a
+    // machine-global port.
+    const env = scratchConfig('{"port":"not-a-port"}')
+    const dir = env.XDG_CONFIG_HOME!
+
+    const proc = Bun.spawn(
+      [process.execPath, 'run', 'src/index.ts', 'serve'],          // deliberately NO --port
+      { env: { ...process.env, XDG_CONFIG_HOME: dir, XDG_RUNTIME_DIR: dir }, stderr: 'pipe' },
+    )
+    // 3s for the same reason as waitForEndpoint above: a 5s race ties with
+    // bun's own 5000ms test timeout and loses, so the child is reaped by the
+    // runner with an anonymous message instead of being SIGKILLed here with a
+    // named one. Measured under the F12-a mutation in fix round 1.
+    const code = await Promise.race([proc.exited, Bun.sleep(3000).then(() => 'timeout' as const)])
+    if (code === 'timeout') {
+      proc.kill('SIGKILL')
+      throw new Error('atrium serve was still alive after 3s — it fell back to a default port instead of rejecting a bad one')
+    }
+    const stderr = await new Response(proc.stderr).text()
+
+    expect(code).toBe(78)                                          // EX_CONFIG
+    expect(stderr).toContain('"port" must be a number')
+    expect(stderr).toContain('not-a-port')                         // the offending value, named
+    // Never started: no endpoint.json, so nothing bound.
+    expect(existsSync(join(dir, 'atrium', 'endpoint.json'))).toBe(false)
+  })
+
   test('src/index.ts threads the loaded config into startServer, not just validates it', () => {
     // A TEXT tripwire, and labelled as one. `loadConfig(); await startServer({
     // port })` — load it, validate it, drop it — passes every other test in
@@ -511,6 +622,12 @@ describe('config reaches the server', () => {
     // received a value derived from a real config file on disk. That is the
     // first point at which this becomes observable at runtime.
     const src = readFileSync(join(import.meta.dir, '..', 'src', 'index.ts'), 'utf8')
-    expect(src).toMatch(/startServer\(\{[^}]*\bconfig:\s*loadConfig\(\)/)
+    // UPDATED in fix round 1 (F12): the `serve` case now binds
+    // `const config = loadConfig()` on its own line, because the port is
+    // resolved OUT of that value, so the old single `config: loadConfig()`
+    // pattern no longer describes the shipped shape. BOTH halves are asserted,
+    // because either one alone is satisfied by load-validate-drop.
+    expect(src).toMatch(/\bconst config = loadConfig\(\)/)
+    expect(src).toMatch(/startServer\(\{[^}]*\bconfig\b[^}]*\}\)/)
   })
 })
