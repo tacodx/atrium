@@ -11,7 +11,7 @@
     "build:server": "bun run gen:assets && bun build --compile --outfile=atrium src/index.ts",
     "build": "bun run build:web && bun run build:server",
     "test": "bun test",
-    "typecheck": "bun run gen:assets && tsc --noEmit",
+    "typecheck": "bun run scripts/gen-assets.ts --allow-empty && tsc --noEmit",
     "assert:package": "bun run scripts/assert-package.ts ./atrium ./web-dist"
   },
   "dependencies": {

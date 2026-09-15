@@ -12,11 +12,17 @@
 // this one names the function as well as the module.
 //
 // Regenerate before every `--compile` build: `bun run scripts/gen-assets.ts`.
-import { readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, readdirSync, writeFileSync } from 'node:fs'
 import { join, relative, dirname } from 'node:path'
 
-const DIST = process.argv[2] ?? './web-dist'
-const OUT = process.argv[3] ?? './src/generated-assets.ts'
+// `--allow-empty` is filtered out of the positionals rather than counted in
+// them: `bun run scripts/gen-assets.ts --allow-empty` must still mean "default
+// DIST, default OUT", and process.argv[2] would otherwise be the flag itself.
+const args = process.argv.slice(2)
+const ALLOW_EMPTY = args.includes('--allow-empty')
+const positional = args.filter(a => !a.startsWith('--'))
+const DIST = positional[0] ?? './web-dist'
+const OUT = positional[1] ?? './src/generated-assets.ts'
 
 function walk(dir: string): string[] {
   let out: string[] = []
@@ -27,9 +33,13 @@ function walk(dir: string): string[] {
   return out
 }
 
-const files = walk(DIST).sort()
-if (files.length === 0) {
-  console.error(`gen-assets: no files found under ${DIST} — did you run the vite build first?`)
+// A MISSING ./web-dist is the same case as an empty one. web-dist is
+// gitignored, so on a fresh clone readdirSync threw ENOENT with a stack trace
+// and the friendly message below could only ever fire for an
+// existing-but-empty directory — the half that never happens in practice.
+const files = existsSync(DIST) ? walk(DIST).sort() : []
+if (files.length === 0 && !ALLOW_EMPTY) {
+  console.error(`gen-assets: no files found under ${DIST} — did you run the vite build first? (bun run build:web)`)
   process.exit(1)
 }
 
@@ -69,4 +79,12 @@ ${entries.join('\n')}
 `
 
 writeFileSync(OUT, body)
+if (files.length === 0) {
+  // Reached only under --allow-empty. `tsc --noEmit` needs this module to
+  // exist at all (src/server/routes.ts:32 imports it), so typecheck writes a
+  // stub rather than skipping generation. build:server keeps the hard failure
+  // above, and assert:package remains the end-to-end proof that a real build
+  // embedded real bytes.
+  console.error(`gen-assets: ${DIST} is missing or empty; wrote a stub manifest for typecheck only — this build serves no assets.`)
+}
 console.log(`gen-assets: wrote ${files.length} entries to ${OUT}`)
