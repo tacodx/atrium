@@ -306,3 +306,67 @@ forever something that will fail identically every run.
 
 Both warnings are in the doc comment at `src/core/rungit.ts:196-222`, where an author changing these options will
 actually be looking.
+
+---
+
+## Measured — the boot handoff (appended by Task 4)
+
+Task 4 ships the only way a session token is ever issued: `startServer` mints **one** handoff per server start,
+writes it 0600 to `handoff.json` beside `endpoint.json` in the 0700 runtime directory, and `POST /api/session`
+trades it, single-use, for the session token. `atrium open --print-url` **reads** that file and prints
+`http://127.0.0.1:<port>/#<handoff>`.
+
+### The 7-day TTL, and why §8.3's ~60s window does not apply
+
+`BOOT_HANDOFF_TTL_MS = 7 * 24 * 60 * 60 * 1000` (`src/server/serve.ts`), passed explicitly to `mintHandoff`
+rather than inheriting `createAuth`'s 60s default.
+
+§8.3's short window exists for one specific exposure: **a handoff delivered in a URL is briefly visible in
+`/proc/<pid>/cmdline`**, which is world-readable on a default Linux with no `hidepid`. This handoff is never in a
+URL until the user's own `atrium open --print-url` puts it there. Between mint and that moment it exists in
+exactly two places — the server's in-process `Map`, and a 0600 file inside a 0700 directory. Neither is readable
+by another uid, so the window that §8.3 is shortening is not open.
+
+A 60s window instead has a concrete failure: a systemd-started server's handoff is **dead before the user reaches
+a browser**. That is the failure mode this ruling trades against, and it is the more likely one.
+
+The TTL is bounded above by the process regardless. `handoffs` is an in-memory `Map` inside `createAuth`'s
+closure, so the handoff dies with the server whatever the constant says; seven days is a ceiling on one server's
+uptime window, never a credential that outlives the process. `cleanup` removes `handoff.json` on every exit path
+(explicit `stop()`, SIGTERM, SIGINT, `process.on('exit')`), under the same pid-ownership rule `endpoint.json`
+already used.
+
+**Tripwire.** `test/serve.test.ts`'s `the boot handoff TTL is long, per the recorded ruling` asserts only
+`>= 24h`. It is labelled a tripwire, not coverage: it can fail only if someone edits the constant. It exists
+because the tempting tidy-up is to drop `mintHandoff`'s second argument and inherit the 60s default — which
+strands every systemd-started user, and which nothing else in the suite would notice.
+
+### Accepted residual — one boot handoff means one browser profile per server start
+
+The handoff is single-use and there is exactly one mint site. **Exactly one browser profile can redeem per server
+start.** A second profile, a second machine on the same X session, or a user who redeems and then clears the
+profile's `localStorage`, gets a 401 and no way to ask for another. Recovery is
+`systemctl --user restart atrium` (or any restart), which mints a fresh one.
+
+This is deliberate. The alternatives were both rejected: an **unauthenticated** mint route hands the session token
+to every local process, which is the whole boundary; a **bearer-gated** one is useless to a client that has no
+bearer yet, which is the only client that needs it.
+
+Second-order consequence, recorded rather than fixed: **after the TTL expires, `atrium open --print-url` still
+prints a well-formed URL that will silently fail to authenticate.** The file is still there and still parses; only
+the map entry is stale, and nothing on the CLI side can tell. Same shape as the already-carried staleness gap on
+`endpoint.json` (a stale file from a crashed instance prints a URL that will not connect), and it belongs with
+that one — a future `atrium doctor` is the place both get checked.
+
+### What the auth boundary actually is, stated plainly
+
+- **Authenticated** (bearer, `verifyBearer`): everything reached through `handleRoute` — `GET /api/state` and
+  `POST /api/actions/:providerId/:actionId`. On the socket: every frame after the first.
+- **Gated but NOT authenticated**: `/healthz` (echoes pid, nonce, embedded-asset count and the resolved exec
+  line), every static asset, `POST /api/session` itself, and the `/ws` upgrade — which any local process can
+  reach with a forged Host/Origin and hold for up to `DEFAULT_WS_AUTH_TIMEOUT_MS`, receiving **zero** application
+  data, which is the control that makes a forgeable Origin survivable (§8.4).
+- **Comparison is `===` on strings and `Map.get` on the handoff — not constant-time.** Out of scope by the task's
+  own ruling, and the reasoning is that the boundary here is the **uid**, not the comparison: a same-uid process
+  can read the 0600 file outright, so a timing side channel is never the cheapest attack available. Revisit only
+  if either token ever becomes reachable across a uid boundary.

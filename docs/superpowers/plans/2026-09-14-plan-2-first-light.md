@@ -1858,6 +1858,39 @@ that **reads** that file. The two mutations above then go red.
 | X14 | `src/core/paths.ts`: `handoffPath` returns `join(configDir(env), 'handoff.json')` unconditionally | `handoffPath and endpointPath are siblings in the runtime directory` |
 | X15 | `src/server/serve.ts`: `BOOT_HANDOFF_TTL_MS` → `60_000` | `the boot handoff TTL is long, per the recorded ruling` |
 
+#### Task 4 addendum — two mutation rows corrected, measured on the post-T3 tree
+
+> Recorded HERE, in the tracked plan, for the same reason Task 3's addendum was: **Task 10 re-runs
+> this whole mutation table**, `.superpowers/sdd/` is gitignored, and a row that cannot redden its
+> named test would read as a regression when Task 10 runs it. Both corrections were measured, not
+> reasoned about — the brief's literal text was run first and its result is recorded below.
+
+| # | The brief says | Measured | The realisable row |
+|---|---|---|---|
+| X8 | drop `&& req.method === 'POST'`, and source the handoff as `… ?? new URL(req.url).searchParams.get('handoff')` | **183 pass / 0 fail — cannot redden.** `req.json()` THROWS on a bodyless GET (bun 1.3.11: `SyntaxError: Unexpected end of JSON input`), so control reaches the `catch`, which sets `handoff = undefined`; the `??` on the try-branch assignment is never evaluated and the route answers 401 exactly as shipped | put the query-string fallback on **both** paths — the try-branch `??` **and** `catch { handoff = new URL(req.url).searchParams.get('handoff') ?? undefined }`. Then 182/1, the named test failing on `Expected: 401 / Received: 200` |
+| X13 | in `case 'open'`, "replace the file read" with a fresh `createAuth().mintHandoff(Date.now())` | the file read is also the ONLY source of `h.port`, so replacing it outright leaves the template with no port and is not a compiling mutant | keep the read, mint only the **token**: `` console.log(`http://127.0.0.1:${h.port}/#${createAuth().mintHandoff(Date.now())}`) ``. Then 182/1 on two different 43-char tokens |
+
+**Eight rows redden MORE than predicted** (all safe-direction; the named test is red in every case):
+X7 → 3 (adds `the same token is rejected on second use` and `an expired token is consumed, not merely
+rejected`), X11 → 6 (every test that redeems the boot handoff), X14 → 23. The re-confirmation of the
+bearer *bypass* direction (`if (false)`) now reddens **2**, not 1: `a GET to /api/session neither
+issues nor consumes` sees 404 from `handleRoute` instead of 401, so that new test doubles as a second
+pin on the bearer check existing at all.
+
+**X14 carries a side effect on the machine it runs on.** With `handoffPath` resolving through
+`configDir`, every server in the suite writes its boot handoff to `$XDG_CONFIG_HOME/atrium/` — and
+with `XDG_CONFIG_HOME` unset that is `~/.config/atrium`, the operator's real config directory. On a
+machine where that directory does not exist the write ENOENTs and the failure is loud and harmless
+(measured: 23 red, `~/.config/atrium` still absent afterwards). **On a machine where it does exist,
+this row writes a live credential into it.** Run X14 as `bun test test/paths.test.ts` — the named
+test is in that file and nothing there starts a server — or check the directory first.
+
+**The socket case's shape is load-bearing and was verified, not assumed.** With X2 applied *and* the
+second frame removed, `test/serve.test.ts` is **21 pass / 0 fail**. The "authenticate, then assert
+the socket is still open past the auth window" shape is vacuous against the very mutation it is
+written for, because the handler still reaches `clearTimeout(state.authTimer)` before the mutated
+assignment matters. The second, non-auth frame is the entire test.
+
 Already-pinned directions to re-confirm unchanged (they must stay red under their existing tests): the bearer
 check mutated to `if (false)` still fails `a token-gated route rejects a request with no bearer`, and deleting
 `if (!auth.authenticateSocket(String(raw))) return ws.close(1008, 'auth')` still fails
