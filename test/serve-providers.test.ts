@@ -16,7 +16,10 @@ test('a registered provider is actually polled by the running server', async () 
     const s = await startServer({
       port: 7430,
       providers: [p],
-      config: { fx: {} },
+      // The marker is the point: an empty {} makes cfg.config reaching
+      // createScheduler unobservable, so a serve.ts that passed `{ config: {} }`
+      // and dropped cfg on the floor would be indistinguishable from this one.
+      config: { fx: { marker: 'threaded' } },
       env: { XDG_RUNTIME_DIR: scratch },
     })
     // The interval is an hour, so the only thing that can have produced a
@@ -24,6 +27,7 @@ test('a registered provider is actually polled by the running server', async () 
     await Bun.sleep(20)
     expect(p.fetchCount).toBe(1)
     expect(p.calls[0]?.schedule).toBe('poll')
+    expect(p.calls[0]?.cfg).toEqual({ marker: 'threaded' })   // cfg.config really reaches the scheduler
     s.stop()
   } finally {
     rmSync(scratch, { recursive: true, force: true })
