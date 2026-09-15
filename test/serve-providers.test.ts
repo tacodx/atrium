@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { startServer } from '../src/server/serve'
@@ -108,6 +108,43 @@ test('a process with a registered provider exits after stop()', async () => {
     // ("a process WITH A REGISTERED PROVIDER exits") true.
     const out = await new Response(proc.stdout).text()
     expect(out).toMatch(/fetches=[1-9]/)
+  } finally {
+    rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+test('SIGTERM stops the scheduler, not just the endpoint file', async () => {
+  // The handlers call shutdown(), not the bare cleanup() that only unlinks
+  // endpoint.json. That difference is invisible to an exit code — both spellings
+  // reach process.exit(0) in the same tick — so this watches the watcher close()
+  // that scheduler.stop() performs on the way out. Measured: reverting the two
+  // handlers to cleanup() leaves the child exiting 0 with no marker.
+  const scratch = mkdtempSync(join(tmpdir(), 'atrium-serveprov-'))
+  const marker = join(scratch, 'marker.log')
+  try {
+    const proc = Bun.spawn(
+      [process.execPath, 'run', 'test/fixtures/sigterm-probe.ts', '7433', marker],
+      { env: { ...process.env, XDG_RUNTIME_DIR: scratch }, stderr: 'pipe', stdout: 'pipe' },
+    )
+
+    const deadline = Date.now() + 5000
+    while (!(existsSync(marker) && readFileSync(marker, 'utf8').includes('ready'))) {
+      if (Date.now() > deadline) {
+        proc.kill('SIGKILL')
+        throw new Error('sigterm-probe never reported ready')
+      }
+      await Bun.sleep(10)
+    }
+
+    proc.kill('SIGTERM')
+    const code = await Promise.race([proc.exited, Bun.sleep(5000).then(() => 'timeout' as const)])
+    if (code === 'timeout') {
+      proc.kill('SIGKILL')
+      throw new Error('sigterm-probe ignored SIGTERM — the handler is gone, or it no longer exits')
+    }
+
+    expect(code).toBe(0)                                            // the handler ran, rather than the default disposition
+    expect(readFileSync(marker, 'utf8')).toMatch(/scheduler-stopped/) // and it went through shutdown(), not cleanup()
   } finally {
     rmSync(scratch, { recursive: true, force: true })
   }
