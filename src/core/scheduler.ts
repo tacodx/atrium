@@ -54,11 +54,19 @@ export function createScheduler(registry: Registry, opts: { config: Readonly<Rec
   // written against (a `repos.staleDays` lookup that is always undefined and
   // always falls back to 30 without anyone noticing).
   //
-  // Synchronous on purpose, and the whole body of createScheduler must stay
-  // that way: start()'s pre-installSources() generation guard is documented as
-  // dead code precisely because there is no await between the runOnStart pass
-  // and installSources(). Making parsing async would make that guard live and
-  // it would then need its own test.
+  // Synchronous on purpose — but be precise about why, because the obvious
+  // reason is wrong (corrected in fix round 1 / F13). createScheduler is a
+  // SYNCHRONOUS FACTORY returning an object literal, and this loop sits in its
+  // body, NOT on the path between start()'s final post-await generation check
+  // and installSources(). Making THIS loop async therefore cannot introduce an
+  // await inside start(), and so cannot on its own make start()'s
+  // pre-installSources() generation guard — documented there as dead code —
+  // live.
+  //
+  // That guard becomes live only if an `await` is ever introduced INSIDE
+  // start() between its last post-await generation check and installSources().
+  // Moving this parse into start() would do exactly that. Keeping it here, at
+  // construction, is what keeps the guard dead.
   const parsed = new Map<string, unknown>()
   for (const p of registry.all()) {
     try {
@@ -242,6 +250,20 @@ export function createScheduler(registry: Registry, opts: { config: Readonly<Rec
           // bound. It is recorded against the schedule its emits would have
           // routed into, which is where a reader looking for "why is this
           // provider not updating" will be looking.
+          //
+          // DIAGNOSTIC IMPRECISION, deliberate (fix round 1 / NF4): cfgFor is
+          // evaluated INSIDE this try, and cfgFor itself can throw — the
+          // registered-after-construction error. So a watch-capable provider
+          // registered after construction records `watch() threw: provider X
+          // was registered after ...` when watch() was in fact never called.
+          // Hoisting the cfgFor call above the try would fix the wording and
+          // make things strictly worse: the throw would then escape
+          // installSources -> start(), and start() is specified never to reject
+          // and is invoked as `void scheduler.start().catch(() => {})`, so the
+          // error would vanish silently instead of being recorded at all. A
+          // mislabelled loud record beats a silent one. Unreachable in
+          // production regardless — startServer registers every provider before
+          // constructing the scheduler.
           recordFailure(p.id, fallback.name, new Error(`watch() threw: ${(e as Error)?.message ?? String(e)}`))
         }
       }
