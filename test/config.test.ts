@@ -479,6 +479,15 @@ describe('config reaches the server', () => {
       expect(stderr).toContain(dir)
       // The discriminator: a config failure, NOT a port failure.
       expect(stderr).not.toContain('already in use')
+      // ADDED in fix round 1 (F10). src/index.ts prints the ConfigError's
+      // message AND, on a second line, its `cause`'s message — the parser's own
+      // "JSON Parse error: ..." — and that second line is what a user actually
+      // debugs with. Deleting it left the whole suite green (measured, 163 pass
+      // / 0 fail), while test/config.test.ts's Test 3 asserted in a COMMENT
+      // that this is what the CLI prints. Counting the lines rather than
+      // matching the parser's wording keeps this independent of bun's exact
+      // JSON error text.
+      expect(stderr.match(/^atrium: /gm) ?? []).toHaveLength(2)
     } finally {
       decoy.stop()
     }
