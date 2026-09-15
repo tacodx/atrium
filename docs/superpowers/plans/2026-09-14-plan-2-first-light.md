@@ -1148,8 +1148,19 @@ treat a line number as a hint only.
         `cfgFor(providerId)`, keeping its existing doc comment;
       - the `p.watch(...)` call inside `start()` (was `opts.config[p.id] as never`, ~line 92) →
         `cfgFor(p.id) as never`.
-      After this edit, `grep -n 'opts\.config\[' src/core/scheduler.ts` must return exactly two
-      lines, both inside the parse loop and `cfgFor`. Run that grep and check it.
+      After this edit,
+      `grep -n 'opts\.config\[' src/core/scheduler.ts | grep -vE ':\s*(//|\*)'` must return
+      exactly two lines, both inside the parse loop and `cfgFor`. Run that grep and check it.
+
+      > **CORRECTED after Task 3 (fix round 1, finding F2).** This gate originally read
+      > `grep -n 'opts\.config\[' src/core/scheduler.ts` must return exactly two lines, and it
+      > was **unsatisfiable at every commit**: `git show 450dc64:` and `git show 117168e:` both
+      > return 4, and HEAD returns 3. The third HEAD hit is the parse-loop comment whose
+      > sentence *this brief itself prescribes* (`There is deliberately no
+      > `if (opts.config[p.id] === undefined) continue``), so obeying the brief's comment text
+      > and satisfying the brief's own grep were mutually exclusive. The comment-filtered form
+      > above is what the gate was actually measuring; verified returning exactly 2 against the
+      > post-fix-round tree. Task 10 must use the corrected form.
 
 - [ ] In `src/index.ts`, add `import { loadConfig, ConfigError } from './core/config'` and
       rewrite the body of the `serve` case's `await startServer(...)` as:
@@ -1308,6 +1319,25 @@ treat a line number as a hint only.
 
 *`describe('config reaches the server')`*
 
+> **AMENDED after Task 3 (fix round 1, findings F5 and F7).** Tests 15 and 16 as shipped differ
+> from the text below, both times deliberately and both times measured. **Task 10 must re-run
+> M9 and M13 against the SHIPPED forms, not reconstruct the versions specified here.**
+>
+> - **Test 15 was RENAMED** to `'startServer hands the loaded config to the scheduler's parse
+>   loop'`. Its old title claimed an ordering property no assertion in it could see: moving
+>   `createScheduler` below the `Bun.serve` try/catch left it green (whole suite 163 pass / 0
+>   fail under that mutation). It pins M13, precisely and only. The ordering half now has its
+>   own test, `'a provider whose config is rejected fails startServer with the port never
+>   bound'`, immediately after it.
+> - **Test 16 was RESTRUCTURED** and renamed to `'a malformed config.json exits 78 with the path
+>   named, before the port is bound'`. It holds the 7423 decoy for the child's WHOLE lifetime
+>   rather than binding 7423 after the child exits. The specified shape **would have hung**:
+>   built and run under M9, the child never exited within 6s, so the brief's own mandated
+>   red-then-green run for M9 would have hung and left a live server squatting machine-global
+>   port 7423. The shipped form is strictly stronger — under M9 `expect(code).toBe(78)` PASSES
+>   (EADDRINUSE also exits 78), so the decoy is the only thing that discriminates.
+> - Both also gained assertions in fix round 1; see the Task 3 addendum after the mutation table.
+
 15. **`'startServer parses the loaded config before it starts listening'`** — write
     `'{"demo":{"staleDays":7}}'` into a scratch config dir; a provider whose `parse` records the
     raw value it was handed; `const s = await startServer({ port: 7422, providers: [p], config: loadConfig(env), env })`.
@@ -1347,6 +1377,65 @@ Fixture check, not an implementation mutation but required before you trust Test
 transforming `parse` for `{ parse: (x: any) => x }` and confirm Test 8 then passes under M1. That
 is the demonstration that the transform is what gives the test teeth; restore the transform
 afterwards.
+
+#### Task 3 addendum — mutation rows added after the brief was written
+
+> Recorded HERE, in the tracked plan, and not only in the task report. **Finding F4 asked for
+> these to go into `.superpowers/sdd/2026-09-14-plan-2-first-light/progress.md` "the TRACKED
+> ledger" — that file is itself gitignored** (`.superpowers/sdd/.gitignore` is a single `*`, and
+> `git ls-files .superpowers` is empty), so moving them there would have carried them from one
+> untracked file to another. This plan document is the only tracked home. **Task 10's regression
+> re-run covers M1–M13 above AND every row below.**
+
+Added during Task 3 (the brief's table left Tests 1, 2, 6 and 13 in no row at all, while
+presenting itself as complete):
+
+| # | Exact edit | Must turn red |
+|---|---|---|
+| M14 | In `src/index.ts`, split the call: `loadConfig()` on its own line, then `startServer({ port })` | The `src/index.ts threads the loaded config…` text tripwire, and nothing else |
+| M15 | Delete `loadConfig`'s ENOENT special case | Test 1 — **and 3 more**: the port-collision test and both SIGTERM/SIGINT tests in `test/serve.test.ts`. Expect **4** failures, not 1 |
+| M16 | Delete the `text.trim() === ''` short-circuit | Test 2 |
+| M17 | Make `configFilePath` ignore its `env` parameter and read `process.env` | Test 6, plus Tests 3, 3b, 4 and 15 (5 total) |
+| M18 | Make `cfgFor`'s final fallback return `undefined` | Test 13, plus `test/contract.test.ts`'s `'exposes the same per-provider config the fetch side receives'` |
+
+Added during Task 3 **fix round 1**, each run red-then-green on the post-fix tree:
+
+| # | Exact edit | Must turn red |
+|---|---|---|
+| M19 | In `cfgFor`, `if (parsed.has(providerId))` → `if (parsed.get(providerId) !== undefined)` | `'a provider whose parse returns undefined is a PARSED entry, not an unregistered one'` |
+| M20 | In `installSources`, `p.watch(cfgFor(p.id) …)` → `p.watch(p.configSchema.parse(opts.config[p.id]) …)` — a correct but freshly-computed value, deliberately **not** M4 | `'watch receives the PARSED value too'` (identity assertion) **and** Test 7 |
+| M21 | In `startServer`, make `scheduler` a `let` and move `createScheduler(...)` below the `Bun.serve` try/catch | `'a provider whose config is rejected fails startServer with the port never bound'` |
+| M22 | Drop `Object.freeze` from **only** `loadConfig`'s ENOENT and empty-file returns, leaving the parsed-value return frozen (a strict narrowing of M8) | Tests 1 and 2 |
+| M23 | Replace `describe()`'s body in `src/core/config.ts` with `return typeof value` | Test 4 (`'…naming what it got instead'`) |
+| M24 | In `src/index.ts`, delete `if (e.cause instanceof Error) console.error(…)` | Test 16 (the two-`atrium: `-lines assertion) |
+| M25 | In `resolvePort`, delete the `Object.hasOwn(config, 'port')` arm so it always returns `DEFAULT_PORT` | `'the config file's "port" key is what binds when no --port is given'` **and** the nonsense-port test |
+| M26 | In `resolvePort`, consult the config key **before** `--port` | `'--port still wins over the config file's "port"'` — and nothing else in the suite |
+| M27 | In `resolvePort`, replace the bad-value throw with `return Number(raw) \|\| DEFAULT_PORT` | `'a nonsense "port" in the config exits 78 rather than silently rebinding the default'` |
+| M28 | In `scripts/assert-package.ts`, delete `env: { ...process.env, XDG_CONFIG_HOME: configHome }` from the `Bun.spawn` | Not a `bun test` row — run `bun run assert:package` with a broken `$XDG_CONFIG_HOME/atrium/config.json`; it must fail `binary never started listening within 5s` |
+
+**Deliberately NOT given a test** (recorded so a later lens does not re-raise it as a gap):
+`ConfigError`'s `this.name = 'ConfigError'` is unpinned — deleting it leaves the suite green.
+Every call site discriminates by `instanceof` / `toThrow(ConfigError)`, nothing in `src/` or
+`test/` reads `.name`, and the only effect is stack-trace cosmetics.
+
+#### Task 3 addendum — carry-forwards for later tasks
+
+- **`test/serve.test.ts` is a SIXTH file touched by Task 3**, beyond the brief's Files list. Its
+  three `src/index.ts serve` children now scope `XDG_CONFIG_HOME` to an empty scratch dir,
+  because `serve` loads the config file as of this task and the alternative is three children
+  reading the operator's home directory — a Global Constraint violation. **Tasks 4–6 must not
+  treat it as untouched since BASE.** `scripts/assert-package.ts` is a **seventh**, scoped the
+  same way in fix round 1.
+- **Task 5's acceptance sentence is off by one.** It says "the three factory `toClient` members";
+  there are **FOUR** `Provider<…>`-typed factories in `test/` — `actions.test.ts:9`,
+  `contract.test.ts:6`, `config.test.ts:37`, `routes.test.ts:8`. Read it as four.
+- **ADR 0002's two `src/core/scheduler.ts` line citations (`:25` and `:63`) no longer resolve.**
+  Task 2 broke them and Task 3 rewrote both expressions. When a task is permitted to touch the
+  ADR, re-anchor by CONTENT: "the `p.fetch(cfgFor(...))` call inside `runNow`" and "the exported
+  `configFor` accessor". The surrounding prose stays substantively true — both reads now go
+  through the one `cfgFor` accessor, which is what that paragraph already argues for.
+- **PORT LEDGER, extended by fix round 1:** Task 3 now also uses **7425 and 7426** (previously
+  unallocated; 7424 is T9's). Full T3 allocation is **7422, 7423, 7425, 7426**.
 
 ---
 
