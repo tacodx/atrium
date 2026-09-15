@@ -3,7 +3,7 @@ import { dirname } from 'node:path'
 import { embeddedFiles } from 'bun'
 import { checkRequest } from './gate'
 import { createAuth } from './auth'
-import { endpointPath, removeEndpointIfOwned, buildExecLine, currentExecContext } from '../core/paths'
+import { endpointPath, handoffPath, removeEndpointIfOwned, buildExecLine, currentExecContext } from '../core/paths'
 import { createRegistry } from '../core/registry'
 import { createScheduler } from '../core/scheduler'
 import { handleRoute, serveAsset } from './routes'
@@ -30,6 +30,22 @@ const WS_MAX_PAYLOAD_BYTES = 1024 * 1024 // 1 MiB
 // reviewer flagged as unverifiable — this timer is what makes "never sent a
 // frame" behave the same as "sent a bad frame."
 const DEFAULT_WS_AUTH_TIMEOUT_MS = 2000
+
+/**
+ * The boot handoff's TTL. §8.3's ~60s window exists because a handoff
+ * delivered in a URL is briefly visible in /proc/<pid>/cmdline, which is
+ * world-readable with no hidepid. This handoff is never in a URL until the
+ * user's own `atrium open --print-url` puts it there: it is written 0600
+ * into the 0700 runtime directory. A 60s window instead means a
+ * systemd-started server's handoff is dead before the user reaches a
+ * browser. Accepted residual, owner-ruled.
+ *
+ * Bounded above by the process anyway: `handoffs` is an in-memory Map inside
+ * createAuth's closure, so the handoff dies with the server whatever this
+ * says. Seven days is a ceiling on a single server's uptime window, not a
+ * credential that outlives it.
+ */
+export const BOOT_HANDOFF_TTL_MS = 7 * 24 * 60 * 60 * 1000   // 604_800_000 — 7 days
 
 interface WsState { authed: boolean; authTimer?: ReturnType<typeof setTimeout> }
 
@@ -111,6 +127,37 @@ export async function startServer(cfg: ServeConfig) {
         const asset = await serveAsset(path, headers)
         if (asset) return asset
 
+        // Handoff -> session token. Position is load-bearing in both directions:
+        // ABOVE the bearer check, because a client redeeming a handoff has no
+        // bearer yet — below it, every request here is a 401 and the route is
+        // unreachable. BELOW serveAsset, so the build-time asset manifest keeps
+        // first refusal exactly as it does today (that manifest is generated from
+        // the real vite dist tree and contains no /api/* key, so nothing can
+        // actually shadow this).
+        //
+        // POST, never GET, for two independent reasons: gate.ts rejects a
+        // non-read method that arrives with no Origin header, and §8.3 forbids
+        // the token travelling in a URL, where it lands in logs and shell
+        // history. A cross-origin form POST is a "simple request" that skips
+        // preflight, but it still carries Origin (and Sec-Fetch-Site), both of
+        // which the gate above already rejected.
+        if (path === '/api/session' && req.method === 'POST') {
+          let handoff: unknown
+          try {
+            handoff = ((await req.json()) as { handoff?: unknown } | null)?.handoff
+          } catch {
+            handoff = undefined                       // malformed body is just a miss
+          }
+          if (typeof handoff !== 'string' || !auth.consumeHandoff(handoff, Date.now())) {
+            // Byte-identical to the bearer 401 below. Unknown, malformed,
+            // expired and already-redeemed are ONE answer: no oracle.
+            return new Response('unauthorized', { status: 401, headers })
+          }
+          // `headers` carries cache-control: no-store, which is why the success
+          // response must use it — this body is the bearer.
+          return Response.json({ token: auth.sessionToken }, { headers })
+        }
+
         if (!auth.verifyBearer(req)) {
           return new Response('unauthorized', { status: 401, headers })
         }
@@ -180,7 +227,32 @@ export async function startServer(cfg: ServeConfig) {
   // then describes A.
   writeFileSync(ep, JSON.stringify({ url: String(server.url), pid: process.pid, nonce, startedAt }), { mode: 0o600 })
 
-  const cleanup = () => { removeEndpointIfOwned(ep, process.pid) }
+  // The ONE mint site. There is deliberately no /api/handoff and no
+  // `atrium rotate-token`: an unauthenticated mint route would hand the session
+  // token to every local process, and a bearer-gated one is useless to a client
+  // that has no bearer. One boot handoff per server start, single-use.
+  //
+  // NEVER console.log/console.error the handoff or the session token from here.
+  // Under systemd that copies a live credential into the persistent journal.
+  // The only process that ever prints the handoff is the user's own
+  // `atrium open --print-url` (src/index.ts).
+  const hp = handoffPath(env)
+  const bootHandoff = auth.mintHandoff(Date.now(), BOOT_HANDOFF_TTL_MS)
+  writeFileSync(hp, JSON.stringify({ token: bootHandoff, port: cfg.port, pid: process.pid }), { mode: 0o600 })
+  // writeFileSync's `mode` is only applied when it CREATES the file.
+  // Measured on bun 1.3.11: rewriting an existing 0644 file with { mode: 0o600 }
+  // leaves it 0644. This file holds a long-lived credential, so assert the mode
+  // every startup — the same reason epDir's 0700 is chmod'd rather than assumed.
+  chmodSync(hp, 0o600)
+
+  // Both files, same pid-ownership rule: removeEndpointIfOwned reads only the
+  // recorded `.pid`, so it is as correct for handoff.json as for endpoint.json.
+  // Extending `cleanup` alone covers every exit path — `shutdown`, both signal
+  // handlers and the server.stop wrapper all funnel through it.
+  const cleanup = () => {
+    removeEndpointIfOwned(ep, process.pid)
+    removeEndpointIfOwned(hp, process.pid)
+  }
   // INVARIANT: scheduler.stop() runs BEFORE the server closes, everywhere this
   // is used. The post-await abort guard in runNow is the only thing suppressing
   // a notification after the server has gone away, so the scheduler has to be
