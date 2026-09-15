@@ -158,7 +158,14 @@ describe('createScheduler config parsing', () => {
     const r = createRegistry()
     let aCount = 0
     let bCount = 0
-    r.register(provider('a', { configSchema: { parse: (x: any) => { aCount++; return x } } as any }))
+    r.register(provider('a', {
+      configSchema: { parse: (x: any) => { aCount++; return x } } as any,
+      // ADDED in fix round 1 (F8): a watch, so the "exactly once" in this
+      // test's title covers all THREE read sites rather than only fetch and
+      // configFor. Without a start() in this test, a second parse site inside
+      // installSources() was invisible to these counters.
+      watch: () => ({ close() {} }),
+    }))
     r.register(provider('b', { configSchema: { parse: (x: any) => { bCount++; return x } } as any }))
 
     const s = createScheduler(r, { config: { a: {}, b: {} } })
@@ -170,7 +177,16 @@ describe('createScheduler config parsing', () => {
     await s.runNow('a', 'poll')
     s.configFor('a')
     s.configFor('b')
-    // Still 1: a per-call parse would now read 3 for 'a'.
+    // The third read site: installSources() calls p.watch(cfgFor(p.id)).
+    // runOnStart is false and the interval is 1h (the helper's default
+    // schedule), so start() installs the watcher and nothing else fires.
+    try {
+      await s.start()
+    } finally {
+      s.stop()
+    }
+    // Still 1: a per-call parse would now read 3 for 'a', and a SECOND parse
+    // site inside installSources() would read 2.
     expect(aCount).toBe(1)
     expect(bCount).toBe(1)
   })
@@ -258,6 +274,15 @@ describe('createScheduler config parsing', () => {
       await s.start()
       expect(watchCfgs).toEqual([PARSED])
       expect(watchCfgs[0]).not.toEqual(RAW)
+      // IDENTITY, not structural equality — added in fix round 1 (F8). The
+      // toEqual above is fully satisfied by a SECOND parse site: rewriting the
+      // call as `p.watch(p.configSchema.parse(opts.config[p.id]))` produces a
+      // correct but freshly-allocated value, which is exactly what this
+      // module's own comment declares impossible ("The ONE parse site in the
+      // system"). Measured: that mutation left the whole suite green before
+      // this line existed, and reddens here with bun's "serializes to the same
+      // string" — the literal signature of structurally-equal-but-not-identical.
+      expect(watchCfgs[0]).toBe(s.configFor('demo'))
     } finally {
       s.stop()
     }
@@ -305,6 +330,40 @@ describe('createScheduler config parsing', () => {
 
     expect(() => s.configFor('late')).toThrow(/registered after the scheduler/)
     await expect(s.runNow('late', 'poll')).rejects.toThrow(/registered after the scheduler/)
+  })
+
+  // ADDED in fix round 1 (F6). The complement of the test above, and the reason
+  // cfgFor asks `parsed.has(id)` rather than `parsed.get(id) !== undefined`:
+  // "parsed to undefined" and "never parsed" are DIFFERENT states, and only the
+  // second is an error.
+  //
+  // MUTATION THIS PINS: in cfgFor, `if (parsed.has(providerId))` ->
+  // `if (parsed.get(providerId) !== undefined)`. That is the shape a refactorer
+  // naturally reaches for, and under it a correctly-registered, correctly-parsed
+  // provider throws the registered-after-construction error instead of serving
+  // its config. Measured before this test existed: the mutation left the whole
+  // suite green (163 pass / 0 fail).
+  test('a provider whose parse returns undefined is a PARSED entry, not an unregistered one', () => {
+    const r = createRegistry()
+    r.register(provider('quiet', { configSchema: { parse: () => undefined } as any }))
+    const s = createScheduler(r, { config: { quiet: { k: 1 } } })
+
+    expect(() => s.configFor('quiet')).not.toThrow()
+    expect(s.configFor('quiet')).toBeUndefined()
+    // And it is the PARSED undefined, not the raw record leaking out through
+    // cfgFor's no-such-provider fallback.
+    expect(s.configFor('quiet')).not.toEqual({ k: 1 })
+
+    // The realistic trigger is blander than a schema that returns undefined on
+    // purpose: this file's own default stub is `{ parse: x => x }`, so ANY
+    // provider with no section in the config file also parses to `undefined`.
+    // That is exactly what `startServer({ port, providers: [fx] })` with no
+    // `config:` key produces — the shape Tasks 4-9 write constantly.
+    const r2 = createRegistry()
+    r2.register(provider('plain'))                        // identity parse, no config section
+    const s2 = createScheduler(r2, { config: {} })
+    expect(() => s2.configFor('plain')).not.toThrow()
+    expect(s2.configFor('plain')).toBeUndefined()
   })
 })
 
