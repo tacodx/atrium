@@ -118,6 +118,42 @@ test('a start() cancelled mid-pass installs no sources for the generation that r
   s.stop()
 })
 
+test('a cancelled generation does not run its remaining runOnStart schedules', async () => {
+  // The post-await generation guard's real job is EARLY EXIT, and that is not
+  // the same property as "installs no second set of sources". `a`'s FIRST call
+  // is fast and its SECOND is slow, so the cancelled generation gets strictly
+  // AHEAD of the generation that replaced it: it finishes `c` while the live
+  // generation is still stuck inside `a`, so there is no inflight entry to
+  // coalesce on and the fetch is a genuine duplicate. watchCalls cannot see
+  // this (it is 1 either way) — countFor('c') is what separates the halves.
+  let aCalls = 0
+  const p = makeFixtureProvider({
+    schedules: [
+      { name: 'a', intervalMs: 3_600_000, runOnStart: true },
+      { name: 'b', intervalMs: 3_600_000, runOnStart: true },
+      { name: 'c', intervalMs: 3_600_000, runOnStart: true },
+    ],
+    fetch: async (_cfg, ctx) => {
+      if (ctx.schedule === 'a') { aCalls++; await Bun.sleep(aCalls === 1 ? 2 : 200); return {} }
+      if (ctx.schedule === 'b') { await Bun.sleep(40); return {} }
+      await Bun.sleep(2); return {}
+    },
+  })
+  const s = schedulerFor(p)
+
+  const first = s.start()             // generation 1: finishes a, enters b
+  await Bun.sleep(10)
+  s.stop()
+  const second = s.start()            // generation 2: restarts at a, now 200ms
+  await second
+  await first                         // the cancelled generation resumes here
+  await Bun.sleep(20)
+
+  expect(p.countFor('c')).toBe(1)     // only the live generation ran c
+  expect(p.watchCalls).toBe(1)        // and only one set of sources was installed
+  s.stop()
+})
+
 test('a failing fetch is recorded in snapshot(), not swallowed', async () => {
   const p = makeFixtureProvider({ fetch: async () => { throw new Error('boom') } })
   const s = schedulerFor(p)

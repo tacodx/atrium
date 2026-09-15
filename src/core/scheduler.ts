@@ -217,17 +217,28 @@ export function createScheduler(registry: Registry, opts: { config: Record<strin
      *    inside runNow.
      * 3. The `!started` re-check after each await, so a stop() mid-pass
      *    cancels the schedules that have not run yet.
-     * 4. The generation re-check, so a cancelled-and-replaced start() cannot
-     *    resume and install a second set of sources. It appears TWICE — after
-     *    each await and again before installSources() — and the two are
-     *    measurably redundant: weakening either one alone leaves the whole
-     *    suite green, and only weakening both turns the generation test red.
-     *    They are kept as a pair deliberately. A stale generation that is
-     *    allowed to continue runs in lockstep just behind the live one and
-     *    shares every inflight promise with it, so installing a second set of
-     *    sources is its ONLY externally observable effect — which means the
-     *    per-half behaviour cannot be separated by any non-contrived test, and
-     *    is recorded as uncovered rather than pinned by a vacuous one.
+     * 4. The generation re-check. It appears TWICE — after each await and
+     *    again before installSources() — and the two are NOT interchangeable:
+     *      - The pre-installSources copy is unreachable with a true condition,
+     *        i.e. dead today. There is no await between the last post-await
+     *        guard and it (only `continue`s and loop headers over materialised
+     *        arrays), and `generation` only ever increases while `started` can
+     *        only go false->true in the same synchronous block that bumps it —
+     *        so its condition always equals the one just evaluated false.
+     *        Measured: deleting it outright leaves the whole suite green. It is
+     *        kept as insurance against a future edit introducing an await
+     *        there (T3 plausibly could, if config parsing becomes async), not
+     *        because it can fire today.
+     *      - The post-await copy is load-bearing, and its job is EARLY EXIT:
+     *        it stops a cancelled generation from running its remaining
+     *        runOnStart schedules. Those do NOT always coalesce with the
+     *        replacing generation's runs on `inflight` — a stale generation
+     *        that is strictly AHEAD of the live one can complete a schedule
+     *        before the live one arrives at it, producing a genuine duplicate
+     *        fetch. Pinned by "a cancelled generation does not run its
+     *        remaining runOnStart schedules" in test/scheduler-lifecycle.test.ts;
+     *        weakening this copy alone turns that test red, weakening the other
+     *        alone leaves it green.
      *
      * A defensive double-start is a plausible caller mistake, not a
      * programming error worth crashing on, but a second pass would double
