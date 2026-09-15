@@ -1,4 +1,4 @@
-import { test, expect } from 'bun:test'
+import { test, expect, afterAll } from 'bun:test'
 import { mkdtempSync, mkdirSync, statSync, existsSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -16,6 +16,21 @@ function connectWs(url: string, origin: string): WebSocket {
   const Ctor = WebSocket as unknown as new (u: string, opts: { headers: Record<string, string> }) => WebSocket
   return new Ctor(url, { headers: { origin } })
 }
+
+// Every `src/index.ts serve` child below inherits this process's environment,
+// and `serve` now loads $XDG_CONFIG_HOME/atrium/config.json (Task 3). An
+// unscoped child therefore reads the DEVELOPER'S real ~/.config/atrium — which
+// the plan forbids ("no test may assert a count or path derived from $HOME")
+// and which would, from Task 7's strict repos schema onward, let one typo in a
+// personal config file redden three tests whose names are about ports and
+// signals. An empty scratch dir makes `loadConfig` take its ENOENT path.
+const emptyConfigHomes: string[] = []
+function emptyConfigHome(): string {
+  const d = mkdtempSync(join(tmpdir(), 'atrium-empty-config-'))
+  emptyConfigHomes.push(d)
+  return d
+}
+afterAll(() => { for (const d of emptyConfigHomes) rmSync(d, { recursive: true, force: true }) })
 
 test('/healthz is unauthenticated but still gated', async () => {
   const s = await startServer({ port: 7391 })
@@ -49,7 +64,14 @@ test('every response carries the standard security headers', async () => {
 
 test('a port collision exits 78, not a restart loop', async () => {
   const decoy = Bun.serve({ hostname: '127.0.0.1', port: 7394, fetch: () => new Response('squatter') })
-  const proc = Bun.spawn([process.execPath, 'run', 'src/index.ts', 'serve', '--port', '7394'], { stderr: 'pipe' })
+  // XDG_CONFIG_HOME is scoped to an empty scratch dir because `serve` now
+  // loads $XDG_CONFIG_HOME/atrium/config.json (Task 3). Without it this child
+  // reads the DEVELOPER'S real config, and one malformed or schema-rejected
+  // file there would turn this test red for a reason its name never mentions.
+  const proc = Bun.spawn([process.execPath, 'run', 'src/index.ts', 'serve', '--port', '7394'], {
+    env: { ...process.env, XDG_CONFIG_HOME: emptyConfigHome() },
+    stderr: 'pipe',
+  })
   const code = await proc.exited
   expect(code).toBe(78)                                        // EX_CONFIG
   expect(await new Response(proc.stderr).text()).toContain('7394')
@@ -195,7 +217,7 @@ test('SIGTERM removes endpoint.json on a real signal to a real process', async (
   try {
     const proc = Bun.spawn(
       [process.execPath, 'run', 'src/index.ts', 'serve', '--port', '7402'],
-      { env: { ...process.env, XDG_RUNTIME_DIR: scratch }, stderr: 'pipe', stdout: 'pipe' },
+      { env: { ...process.env, XDG_RUNTIME_DIR: scratch, XDG_CONFIG_HOME: emptyConfigHome() }, stderr: 'pipe', stdout: 'pipe' },
     )
     expect(await waitForFile(epPath)).toBe(true)   // server actually started and wrote the file
 
@@ -214,7 +236,7 @@ test('SIGINT removes endpoint.json on a real signal to a real process', async ()
   try {
     const proc = Bun.spawn(
       [process.execPath, 'run', 'src/index.ts', 'serve', '--port', '7403'],
-      { env: { ...process.env, XDG_RUNTIME_DIR: scratch }, stderr: 'pipe', stdout: 'pipe' },
+      { env: { ...process.env, XDG_RUNTIME_DIR: scratch, XDG_CONFIG_HOME: emptyConfigHome() }, stderr: 'pipe', stdout: 'pipe' },
     )
     expect(await waitForFile(epPath)).toBe(true)
 
