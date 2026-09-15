@@ -200,7 +200,15 @@ describe('createScheduler config parsing', () => {
     // property's mutation, and would leave the parse call itself unpinned.
     // Measured: with this assertion below the runNow, the skip-undefined
     // mutation never reaches it.
-    expect(parseArgs).toEqual([undefined])                // called ONCE, with undefined
+    //
+    // And the length is asserted SEPARATELY, because
+    // `expect(parseArgs).toEqual([undefined])` is itself vacuous here:
+    // toEqual ignores array sparseness and undefined entries, so in bun 1.3.11
+    // `expect([]).toEqual([undefined])` PASSES. Measured with a throwaway
+    // probe, not assumed. toStrictEqual also distinguishes them; the explicit
+    // length says out loud which half is load-bearing.
+    expect(parseArgs.length).toBe(1)                      // called EXACTLY once...
+    expect(parseArgs[0]).toBeUndefined()                  // ...with undefined
 
     await s.runNow('repos', 'poll')
     expect(sawInFetch).toEqual({ staleDays: 30 })
