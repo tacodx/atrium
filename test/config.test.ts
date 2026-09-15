@@ -467,10 +467,14 @@ describe('config reaches the server', () => {
       // JSON produces a child that binds and runs FOREVER. Without this the
       // test would die on bun's timeout and leave a live server holding a
       // machine-global port for every later run.
-      const code = await Promise.race([proc.exited, Bun.sleep(5000).then(() => 'timeout' as const)])
+      // 3s, not 5s (tightened in fix round 1): bun's own per-test timeout is
+      // also 5000ms, so a 5s guard ties with it and loses — the runner reaps
+      // the child with an anonymous "timed out after 5000ms" instead of this
+      // named diagnostic firing and SIGKILLing it here. Measured.
+      const code = await Promise.race([proc.exited, Bun.sleep(3000).then(() => 'timeout' as const)])
       if (code === 'timeout') {
         proc.kill('SIGKILL')
-        throw new Error('atrium serve was still alive after 5s — it did not exit on a malformed config')
+        throw new Error('atrium serve was still alive after 3s — it did not exit on a malformed config')
       }
       const stderr = await new Response(proc.stderr).text()
 
