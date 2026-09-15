@@ -1427,8 +1427,12 @@ Every call site discriminates by `instanceof` / `toThrow(ConfigError)`, nothing 
   treat it as untouched since BASE.** `scripts/assert-package.ts` is a **seventh**, scoped the
   same way in fix round 1.
 - **Task 5's acceptance sentence is off by one.** It says "the three factory `toClient` members";
-  there are **FOUR** `Provider<…>`-typed factories in `test/` — `actions.test.ts:9`,
-  `contract.test.ts:6`, `config.test.ts:37`, `routes.test.ts:8`. Read it as four.
+  there are **FOUR** `Provider<…>`-typed factories in `test/`, named here by SYMBOL because this
+  plan has had five stale `file:line` citations already (one of them introduced by the very edit
+  that added this paragraph — the factory moved from `:37` to `:47`):
+  `actions.test.ts`'s `provider`, `contract.test.ts`'s `stub`, `config.test.ts`'s `provider`,
+  and `routes.test.ts`'s `stubProvider`. Re-derive with
+  `grep -rn ": Provider<" test/*.ts | grep -v "import type"`. Read the acceptance sentence as four.
 - **ADR 0002's two `src/core/scheduler.ts` line citations (`:25` and `:63`) no longer resolve.**
   Task 2 broke them and Task 3 rewrote both expressions. When a task is permitted to touch the
   ADR, re-anchor by CONTENT: "the `p.fetch(cfgFor(...))` call inside `runNow`" and "the exported
