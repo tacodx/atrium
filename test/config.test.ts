@@ -368,7 +368,15 @@ describe('createScheduler config parsing', () => {
 })
 
 describe('config reaches the server', () => {
-  test('startServer parses the loaded config before it starts listening', async () => {
+  // RENAMED in fix round 1 (F7). It was
+  // 'startServer parses the loaded config before it starts listening', and the
+  // "before it starts listening" half was a claim no assertion in it could see:
+  // moving the createScheduler call BELOW the Bun.serve try/catch left this
+  // test green (measured — whole suite 163 pass / 0 fail under that mutation).
+  // What it does pin, precisely and only, is the brief's M13 (serve.ts
+  // hardcoding `{ config: {} }`). The ordering half now has its own test
+  // directly below.
+  test("startServer hands the loaded config to the scheduler's parse loop", async () => {
     const env = scratchConfig('{"demo":{"staleDays":7}}')
     const parseArgs: unknown[] = []
     const p = provider('demo', {
@@ -385,6 +393,49 @@ describe('config reaches the server', () => {
       expect(parseArgs).toEqual([{ staleDays: 7 }])
     } finally {
       s.stop()
+    }
+  })
+
+  // ADDED in fix round 1 (F7): the ordering property the test above only
+  // claimed in its title.
+  //
+  // MUTATION THIS PINS: in src/server/serve.ts, replace
+  // `const scheduler = createScheduler(...)` with
+  // `let scheduler!: ReturnType<typeof createScheduler>` and move the
+  // construction BELOW the Bun.serve try/catch. startServer still rejects with
+  // a ConfigError, so a rejects.toThrow assertion alone stays green — measured,
+  // whole suite 163 pass / 0 fail. The only observable difference is that the
+  // port was bound on the way out, and the mutant never unbinds it.
+  //
+  // 7422 is reused from the test above deliberately: a CORRECT implementation
+  // never binds it here, and the test above stops its own server. Staying
+  // inside T3's ledger allocation (7422-7423) rather than claiming a new
+  // machine-global port.
+  test('a provider whose config is rejected fails startServer with the port never bound', async () => {
+    const bad = provider('demo', {
+      configSchema: { parse: () => { throw new Error('staleDays must be a positive integer') } } as any,
+    })
+
+    await expect(
+      // Scratch env, so a mutant that gets far enough to write endpoint.json
+      // writes it into the scratch dir and never the developer's real one.
+      startServer({ port: 7422, providers: [bad], config: { demo: { staleDays: -1 } }, env: scratchConfig() }),
+    ).rejects.toThrow(ConfigError)
+
+    let bound: ReturnType<typeof Bun.serve>
+    try {
+      bound = Bun.serve({ hostname: '127.0.0.1', port: 7422, fetch: () => new Response('free') })
+    } catch (e) {
+      // Re-thrown with a NAMED cause rather than letting bun's bare
+      // "Is port 7422 in use?" stand: under the mutation above it is
+      // startServer that left the port bound, and the raw message does not say
+      // so. This is the line that goes red.
+      throw new Error(`startServer bound port 7422 before rejecting the config — ${(e as Error).message}`)
+    }
+    try {
+      expect(bound.port).toBe(7422)
+    } finally {
+      bound.stop()
     }
   })
 
