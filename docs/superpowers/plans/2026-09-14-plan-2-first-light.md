@@ -3420,6 +3420,54 @@ cover exception text, and it must not be cited as if it did.** Owner: a plan-lev
 at `recordFailure`, or replace the message with a closed-set code plus a server-side message.
 Carried forward to Task 10.
 
+**Fix round (minors only; both review lenses approved the task with 0 Important).** Base `89eb962`,
+205 / 0 / 561 across 15 files. Exit **206 / 0 / 567** (+1 test), typecheck 0. Six rows.
+
+- **F-A — a `null` message body could throw into the WebSocket listener (real; the only code fix).**
+  `web/src/lib/socket.ts` parsed inside a try/catch, as §8.4 requires, and then handed the parsed
+  value to `deps.onFrame` whatever it was. `JSON.parse` succeeds on `null`, `42` and `"str"`; only
+  `not json` throws, and that one the try/catch already covered. `onFrame` is `store.apply`, which
+  reads `frame.type`, so a body of `null` raised a `TypeError` **inside** the event listener — the
+  exact failure the try/catch exists to prevent. `frame?.type === 'ready'` guarded the ready branch
+  but not the `onFrame` call. Fixed with `if (typeof parsed !== 'object' || parsed === null) return`
+  after the parse; arrays still pass and are harmless (`[].type` is `undefined`, the switch falls
+  through). New **test 19** in `test/client-wire.test.ts` wires the fake socket to a REAL
+  `createStore()` and fires all four bodies. **MUTATION M24** — exact-string delete of that one guard
+  line; typechecks (exit 0); **RED 205 / 1 / 562**, exactly test 19,
+  `expect(received).not.toThrow()` / `TypeError: null is not an object (evaluating 'frame.type')` at
+  `test/client-wire.test.ts:262`. Reverted → **GREEN 206 / 0 / 567**. Only the `null` body reddens it;
+  `42` and `"str"` survive the mutant because `(42).type` is merely `undefined`. Row for Task 10.
+- **F-B — Test 17's mutation comment named an unobservable literal.** It cited M22 as written
+  (`originalStop()` before `scheduler.stop()`), which the M22 row above measures GREEN and explains
+  can never be otherwise. Reworded to name **M22-realisable** (`const shutdown = () => { cleanup() }`,
+  four red) and to say the test pins that `scheduler.stop()` runs on the stop path at all, not that
+  it runs first. Comment only — nothing measurable changed.
+- **F-C — Test 5's mutation comment described the M7 literal but claimed the realisable row's
+  outcome.** The literal replaces the publishes only, keeps `ws.subscribe(STATE_TOPIC)`, and reddens
+  Test 4 alone; `subscriberCount` is 0 only under **M7-realisable**, which also replaces the
+  subscribe with `live.add(ws)`. Reworded to say both. Comment only — nothing measurable changed.
+- **F-D — `src/core/wire.ts` claimed a provider-id charset that nothing enforces.** The
+  `providerTopic` doc comment said "Provider ids match `[A-Za-z0-9_-]+`, so this never collides with
+  STATE_TOPIC". `registry.register()` checks duplicate ids, duplicate action ids and the three
+  schedule-shape rules; it applies **no charset regex** — ids are unconstrained at registration.
+  Reworded: the non-collision holds **by construction**, because `providerTopic` always yields
+  `state:<id>`, which is never the string `state`, for any id whatsoever. Comment only — nothing
+  measurable changed.
+- **F-E — `onAuthFailure`: the plan says two different things; shipped follows main.tsx. Recorded,
+  not resolved.** The socket bullet says the caller wires it to "`clearToken` plus a re-read of the
+  fragment"; the `main.tsx` bullet says `clearToken(browserSessionDeps())` followed by a re-render
+  into the unauthenticated notice. Shipped is the main.tsx form
+  (`clearToken(...); setAuthed(false)`), and it is the right one on the facts: `acquireToken`
+  scrubbed the fragment at mount, so a re-read at 1008 time finds an empty hash and can only
+  re-derive the stored token that was just cleared. **`web/src/lib/socket.ts:71` still carries the
+  socket bullet's wording verbatim** ("plus a re-read of the fragment") and was left as found,
+  because correcting it would settle the ambiguity rather than record it. Whichever way the ruling
+  goes, exactly one of the two sites needs an edit. Owner: plan-level ruling. Carried to Task 10.
+- **F-F — cross-file port check.** `grep -n 7412 test/ws-protocol.test.ts` hits **only lines 11-12**,
+  the comment recording the ports ruling. Every bound port in that file is a `const port =` in
+  7413-7421, with no reuse. 7412 stays with `test/serve.test.ts` (Task 4's fix round). No collision,
+  masked or otherwise; no test was moved.
+
 ---
 
 ## Out of scope for this task
