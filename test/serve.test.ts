@@ -3,19 +3,7 @@ import { mkdtempSync, mkdirSync, statSync, existsSync, readFileSync, writeFileSy
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { startServer, BOOT_HANDOFF_TTL_MS } from '../src/server/serve'
-
-// bun's global WebSocket supports a non-standard second-arg `{ headers }` init
-// at runtime — the only way a non-browser client can set Origin on the
-// upgrade request (§8.4 test setup below). With this project's DOM lib loaded
-// (needed for the web/ frontend), bun-types' declaration merging resolves the
-// *type* of the global `WebSocket` to the plain DOM constructor instead
-// (whose 2nd param is `protocols: string | string[]`), so tsc rejects the
-// object-literal form even though bun executes it correctly — confirmed by
-// every test below actually passing.
-function connectWs(url: string, origin: string): WebSocket {
-  const Ctor = WebSocket as unknown as new (u: string, opts: { headers: Record<string, string> }) => WebSocket
-  return new Ctor(url, { headers: { origin } })
-}
+import { connectWs } from './fixtures/ws'
 
 // Every `src/index.ts serve` child below inherits this process's environment,
 // and `serve` now loads $XDG_CONFIG_HOME/atrium/config.json (Task 3). An
