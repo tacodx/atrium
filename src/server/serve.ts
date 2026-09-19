@@ -7,7 +7,31 @@ import { endpointPath, handoffPath, removeEndpointIfOwned, buildExecLine, curren
 import { createRegistry } from '../core/registry'
 import { createScheduler } from '../core/scheduler'
 import { handleRoute, serveAsset } from './routes'
+import { STATE_TOPIC, providerTopic, WIRE_ERROR_MESSAGES } from '../core/wire'
+import type { ClientFrame, ServerFrame, WireErrorCode } from '../core/wire'
 import type { Provider } from '../core/contract'
+import type { ProviderStatus as SchedulerProviderStatus } from '../core/scheduler'
+import type { ProviderStatus as WireProviderStatus } from '../core/wire'
+import type { ServerWebSocket } from 'bun'
+
+// Drift guard: wire.ts cannot import from scheduler.ts (Test 8 forbids every
+// import there, because Vite bundles wire.ts into the browser build). These two
+// assignments make a divergence a `tsc` error instead of a runtime surprise.
+const _wireMatchesScheduler: WireProviderStatus = {} as SchedulerProviderStatus
+const _schedulerMatchesWire: SchedulerProviderStatus = {} as WireProviderStatus
+void _wireMatchesScheduler; void _schedulerMatchesWire
+
+// A provider's wire value is `unknown` and reaches JSON.stringify unvalidated;
+// a circular reference or a BigInt throws TypeError. Unguarded, that exception
+// escapes into the scheduler's listener loop and into the websocket.message
+// handler. Every site that turns a frame into a string goes through frameJson;
+// never call JSON.stringify on a frame directly.
+const UNSERIALIZABLE_JSON = JSON.stringify(
+  { type: 'error', code: 'unserializable', message: WIRE_ERROR_MESSAGES['unserializable'] } satisfies ServerFrame,
+)
+function frameJson(frame: ServerFrame): string {
+  try { return JSON.stringify(frame) } catch { return UNSERIALIZABLE_JSON }
+}
 
 const SECURITY_HEADERS = (port: number) => ({
   'x-content-type-options': 'nosniff',
@@ -48,6 +72,15 @@ const DEFAULT_WS_AUTH_TIMEOUT_MS = 2000
 export const BOOT_HANDOFF_TTL_MS = 7 * 24 * 60 * 60 * 1000   // 604_800_000 — 7 days
 
 interface WsState { authed: boolean; authTimer?: ReturnType<typeof setTimeout> }
+
+// The error frame's message is ALWAYS WIRE_ERROR_MESSAGES[code]. Never
+// `(e as Error).message`, never any part of the client's frame. routes.ts
+// echoes ids in its HTTP 400s because those ids came from a validated path
+// regex; a WS frame is arbitrary bytes up to the 1 MiB maxPayloadLength and
+// is never echoed. (test/ws-protocol.test.ts test 7, mutation M10.)
+const sendError = (ws: ServerWebSocket<WsState>, code: WireErrorCode) => {
+  ws.send(frameJson({ type: 'error', code, message: WIRE_ERROR_MESSAGES[code] }))
+}
 
 export interface ServeConfig {
   port: number
@@ -188,9 +221,40 @@ export async function startServer(cfg: ServeConfig) {
             if (!auth.authenticateSocket(String(raw))) return ws.close(1008, 'auth')
             state.authed = true
             clearTimeout(state.authTimer)
+            // Subscribed HERE, on successful auth, and NEVER in open(). Bun
+            // drops a socket's subscriptions when it closes (measured:
+            // subscriberCount(STATE_TOPIC) returns to 0 with no server-side
+            // bookkeeping), so close() needs nothing beyond its clearTimeout.
+            // Subscribing in open() reads as harmless and turns none of Plan 1's
+            // tests red; it is also a direct §8.4 violation, because a socket
+            // that never authenticates would then receive every update the
+            // scheduler publishes. (test/ws-protocol.test.ts test 1, mutations
+            // M1 and M3; test 2, mutation M2 on the order of the two sends.)
+            ws.subscribe(STATE_TOPIC)
+            ws.send(frameJson({ type: 'ready' }))
+            ws.send(frameJson({ type: 'snapshot', providers: scheduler.snapshot() }))
             return
           }
-          // Provider subscriptions land here in a later plan.
+          // Post-auth frames. A post-auth `auth` frame is not a valid frame
+          // type: it falls through to unknown-frame-type, changes nothing, and
+          // neither re-enters the auth branch nor closes the socket (test 7).
+          let msg: unknown
+          try { msg = JSON.parse(String(raw)) } catch { return sendError(ws, 'bad-frame') }
+          const frame = msg as Partial<ClientFrame>
+          if ((frame?.type === 'subscribe' || frame?.type === 'unsubscribe')) {
+            const id = (frame as { providerId?: unknown }).providerId
+            if (typeof id !== 'string' || id.length === 0) return sendError(ws, 'bad-frame')
+            if (!registry.get(id)) return sendError(ws, 'unknown-provider')   // M11
+            // Narrowing is bandwidth management, NOT an authorization control:
+            // the socket leaves the firehose and joins provider topics, and is
+            // on one or the other, never both, so no update is ever duplicated.
+            // The authorization control is that an unauthenticated socket is
+            // subscribed to nothing at all (test 1). (test 4, mutation M6.)
+            if (frame.type === 'subscribe') { ws.unsubscribe(STATE_TOPIC); ws.subscribe(providerTopic(id)) }
+            else { ws.unsubscribe(providerTopic(id)) }
+            return
+          }
+          return sendError(ws, 'unknown-frame-type')
         },
 
         close(ws) {
@@ -257,9 +321,10 @@ export async function startServer(cfg: ServeConfig) {
   // is used. The post-await abort guard in runNow is the only thing suppressing
   // a notification after the server has gone away, so the scheduler has to be
   // quiesced first — a listener firing into a closed server is a publish on a
-  // dead socket. (Not observable from this task: both calls are synchronous and
-  // land in the same tick, so nothing can resume between them. It becomes
-  // falsifiable once an onUpdate -> publish wire exists.)
+  // dead socket. (Both calls are synchronous and land in the same tick, so
+  // nothing can resume between them; what IS observable now that the
+  // onUpdate -> publish wire below exists is that scheduler.stop() runs at
+  // all on this path — test/ws-protocol.test.ts test 17, mutation M22.)
   const shutdown = () => { scheduler.stop(); cleanup() }
   // Left as the bare cleanup on purpose: this is a last-resort unlink on a
   // process that is already going away, not a lifecycle hook.
@@ -283,8 +348,33 @@ export async function startServer(cfg: ServeConfig) {
   // /healthz is already answering. start() is specified never to reject, so
   // the .catch is defence in depth against a future edit inside it rather than
   // a live failure path.
-  // A later task inserts scheduler.onUpdate(...) -> server.publish here,
-  // BEFORE this line.
+  //
+  // INVARIANT: the publisher is registered BEFORE start(). Registering after
+  // it would lose every runOnStart update the moment start() becomes
+  // synchronous again (today it suspends at its first await, so the next
+  // statement still lands first — which is exactly why no test can see the
+  // ordering; the plan withdraws that mutation, M5, rather than fake it).
+  //
+  // Every update is published TWICE — to the firehose and to the provider's
+  // own topic. A socket is on one or the other, never both (see the subscribe
+  // handler), so no socket receives a duplicate; publishing to a topic with
+  // zero subscribers is free (measured on bun 1.3.11: publish returns 0 and
+  // does not throw). The frame carries the WHOLE ProviderStatus — data AND
+  // schedules — because Task 9's unavailable-vs-zero check has no data
+  // otherwise (test 3, mutation M4). Everything in `status` is already
+  // redacted by the scheduler; toClient is never called here (test 18, M23).
+  //
+  // The body is exception-free through frameJson (test 6, mutation M8); the
+  // try/catch is so that no future edit inside it can throw into the
+  // scheduler's listener loop. (test 5, mutation M7: topic routing, not a
+  // hand-rolled socket set that would need pruning.)
+  scheduler.onUpdate((providerId, status) => {
+    try {
+      const json = frameJson({ type: 'update', providerId, status })
+      server.publish(STATE_TOPIC, json)
+      server.publish(providerTopic(providerId), json)
+    } catch { }
+  })
   void scheduler.start().catch(() => {})
 
   return server
