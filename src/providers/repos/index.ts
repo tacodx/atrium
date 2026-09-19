@@ -205,6 +205,15 @@ async function gate(candidate: string, timeoutMs: number, probe: boolean): Promi
   if (!isCodeZero(r.code)) return probe ? { kind: 'skip' } : { kind: 'dropped', path: candidate, reason: 'invalid' }
 
   const raw = r.stdout.trim()
+  // Exit 0 with EMPTY stdout, guarded because of what the next line would do
+  // with it, not because anything has been seen to produce it: realpathSync('')
+  // returns the ATRIUM PROCESS's own cwd (measured on bun 1.3.11), so an empty
+  // answer would be compared as though git had named a real directory. No
+  // fixture can reach this line — rev-parse --absolute-git-dir on git 2.55.0
+  // either prints a path and exits 0 or prints nothing and exits 128 — so it
+  // carries no mutation row and is held by inspection alone. The probe split
+  // is the one the exit-code line above already makes: a root is never named.
+  if (raw === '') return probe ? { kind: 'skip' } : { kind: 'dropped', path: candidate, reason: 'invalid' }
   const gitDir = safeRealpath(raw) ?? raw
   const dotGit = join(candidate, '.git')
 
