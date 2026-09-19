@@ -5632,3 +5632,81 @@ operator-typed config. Test 30 pins that no error code contains a `/`.
   the entry "forces this row to match regardless"; there is nothing to ask git).
 - Roots and every walked directory are already realpath-resolved (roots by `realpathSync`, children
   because symlinks are never followed), so candidates are not re-resolved.
+
+##### Fix round (BASE `587740a`) — the walker's symlink guard, the root-probe leak, and the empty-stdout guard
+
+> Same method as the table above: full `bun test` plus `bun run typecheck` at every step, exact-string
+> replacement that refuses unless the target occurs exactly once, reverted with `git checkout` and
+> diff-stat verified empty. Baseline re-measured before anything was touched: **236 / 0 / 651 across
+> 16 files**, typecheck 0. Exit: **238 / 0 / 661 across 16 files** (+2 tests, both in
+> `test/repos-discovery.test.ts`). Three files changed in total: the provider, that test file, and
+> this section.
+
+**R1 — the walker's symlink guard was pinned by `repos` alone, which cannot move.** Test 11 ('a
+symlink to a repo inside the root does not produce a second entry') asserted only that `repos` has
+one entry, and under a symlink-FOLLOWING walker it still does: the link is walked, becomes a
+candidate at its in-root path, and the gate's containment comparison drops it — into `dropped`,
+which the test did not look at. Test 11 now also asserts `dropped` is `[]`, and a second test pins
+the case test 11 structurally cannot, the escape: a repo in its own tracked temp root OUTSIDE the
+scanned root, reached by `symlinkSync(outside, join(root, 'escape'))`, with `repos`, `dropped` and
+`errors` all `[]` and the outside path absent from `JSON.stringify` of both `Data` and the wire
+shape.
+
+**The fix-round mutation row (not in M1–M11; Task 10 should run it as a twelfth).** Target: `walkDir`'s
+entry filter `if (!entry.isDirectory()) continue` replaced by `if
+(!statSync(join(dir, entry.name)).isDirectory()) continue` (plus `statSync` on the `node:fs` import
+line) — a directory check that FOLLOWS symlinks. Mutant typechecks (exit 0). Measured **235 / 2 /
+654**: exactly the two tests named above, each failing on its own `expect(data.dropped).toEqual([])`
+(the last assertion of test 11, the second of the escape test), each receiving exactly one
+`invalid` row naming the LINK at its in-root path — `…/link` and `…/escape`. Worth recording for
+Task 10: the escape test's two `JSON.stringify` assertions are never reached, and would not fire if
+they were, because the gate drops the link under the path the walker used, not under the target's.
+The red is on `dropped` in both cases, and `repos` is `[1 entry]` / `[]` as before. Reverted,
+re-measured **237 / 0 / 657**.
+
+**R2 — `dropped` named the scan root, and for the home root that is the username.** A PROBE ROOT
+whose `rev-parse` timed out (or whose gate call threw) was pushed into `dropped` as
+`{ name: basename(root), … }`, unlike the non-zero-exit case, which is silently skipped precisely
+so that no dashboard reports every user's `$HOME` as a broken repository. Fixed with a fourth
+`Verdict` arm, `{ kind: 'probe-error' }`: the gate returns it for a probe timeout, `discover`'s
+per-candidate `catch` returns it for a probe throw, and the single accounting site in the verdict
+loop pushes `'candidate-error'` — the closed set — and skips. Non-probe candidates are untouched:
+a timed-out candidate is still `dropped` with reason `'timed-out'`, a throwing one still
+`'candidate-error'` plus `invalid`. New test, `makeSlowGitShim` on `rev-parse` with
+`classifyTimeoutMs` 200 over an EMPTY root, so the probe is the only gate call in the pass. Run RED
+against `587740a` first: **237 / 1 / 658 across 238**, failing on `expect(data.dropped).toEqual([])`
+with the leak itself — `{ name: "atrium-scan-…", path: "/tmp/atrium-scan-…", reason: "timed-out" }`.
+GREEN after the fix: **238 / 0 / 661**.
+
+**R3 — `rev-parse` exiting 0 with empty stdout.** Guarded, because the very next line would hand
+`''` to `safeRealpath`, and `realpathSync('')` returns the ATRIUM PROCESS's own cwd (measured, bun
+1.3.11) — an unrelated directory compared as though it were the candidate's gitdir. Stated plainly:
+**no fixture can produce the shape**, so the guard carries no mutation row and no test, and is held
+by inspection alone; on git 2.55.0 `rev-parse --absolute-git-dir` either prints a path and exits 0
+or prints nothing and exits 128, which the exit-code line already catches. One deliberate reading of
+the fix brief, flagged for the reviewer: the brief says "`if (out === '') → invalid`", and the guard
+ships as `probe ? skip : dropped invalid` — the same split the exit-code line above it already
+makes — because R2's whole rule is that no root probe ever produces a `dropped` row naming the user.
+Collapse it to an unconditional `invalid` in one word if that reading is wrong.
+
+**"The two shim tests" (§ Task 7's test list).** The list promises two; only one existed — the
+classifier's `check-ignore` timeout (test 24). R2's is the second, and it slows a different
+subcommand (`rev-parse`) at a different stage (the gate, not the classifier), so the pair now covers
+both git-facing stages. Task 10 should expect two.
+
+**Recorded for Task 8, not fixed here: rows 2–4 pass `rel` as a BARE pathspec.** `classify` calls
+`ls-files -s -- rel`, `ls-files -- rel` and `check-ignore -q -- rel`, where `rel` is a directory name
+straight off the filesystem, so git applies glob magic to `*`, `?` and `[` in it. Measured (git
+2.55.0): in a parent tracking a plain file `a1`, `ls-files -- 'a[1]'` returns `a1`, so a child repo
+in a directory literally named `a[1]` is claimed by row 3 and dropped as `vendored` although nothing
+of it is tracked; `ls-files -- ':(literal)a[1]'` returns nothing. The `--` already present stops
+option injection and is not the issue; `:(literal)` prefixing is the fix, and it belongs with Task
+8's own pathspec work rather than in a fix round scoped to three files. No test is claimed for it
+here.
+
+**Recorded for Task 10: M11 is reddenable with a shim, just not with a fixture.** The table above
+reports M11 (gate accept → `code !== 128`) as green-both-ways because every fixture-producible gate
+failure exits exactly 128. A `makeSlowGitShim`-shaped shim that intercepts `rev-parse` and exits 1
+instead of execing git would make the mutant accept a non-repository, and test 6 would then redden
+on the `dropped` row it expects. That is a new fixture builder, so it is out of this round's
+three-file scope; Task 10 may add it rather than re-measuring M11 as a tests-check.
