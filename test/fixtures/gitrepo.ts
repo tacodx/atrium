@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync, mkdirSync, chmodSync, existsSync, rmSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, mkdirSync, chmodSync, existsSync, rmSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
@@ -260,4 +260,75 @@ export function makeSlowGitShim(realGit: string, slowSubcommand: string, sleepBi
   writeFileSync(shim, `#!/bin/sh\ncase " $* " in *" ${slowSubcommand} "*) exec ${sleepBin} 3 ;; esac\nexec ${realGit} "$@"\n`)
   chmodSync(shim, 0o755)
   return dir
+}
+
+// --- Metadata fixture builders (Task 8) -------------------------------------------
+
+/**
+ * A conflicting rebase of `<branch>` ONTO main, so `rebase-merge/head-name`
+ * (or `rebase-apply/head-name` with the apply backend) is
+ * `refs/heads/<branch>` and progress is 1 of 1. T7's `startRebaseConflict`
+ * rebases main onto side (head-name main); this one is what Task 8's tests 3
+ * and 4 assert against.
+ */
+export function startBranchRebaseConflict(repo: string, branch: string, backend: 'merge' | 'apply'): void {
+  writeFileSync(join(repo, 'f.txt'), 'line1\n')
+  commitAll(repo, 'base')
+  git(repo, 'checkout', '-q', '-b', branch)
+  writeFileSync(join(repo, 'f.txt'), 'branch\n')
+  commitAll(repo, 'branch')
+  git(repo, 'checkout', '-q', 'main')
+  writeFileSync(join(repo, 'f.txt'), 'main\n')
+  commitAll(repo, 'main')
+  git(repo, 'checkout', '-q', branch)
+  conflictOp(repo, backend === 'apply' ? ['rebase', '--apply', 'main'] : ['rebase', '--merge', 'main'])
+}
+
+/** `n` untracked files under `<repo>/a/b/` — the `-uall` shape (47 with it, 1 without). */
+export function addUntrackedFiles(repo: string, n: number): void {
+  const dir = join(repo, 'a', 'b')
+  mkdirSync(dir, { recursive: true })
+  for (let i = 0; i < n; i++) writeFileSync(join(dir, `u${i}.txt`), `${i}\n`)
+}
+
+/**
+ * A tracked directory holding an executable named `git` whose only content is
+ * a shebang naming an interpreter that does not exist. execve fails with
+ * ENOENT, Node surfaces `err.code === 'ENOENT'`, and runGit passes it through
+ * as the STRING `code` — the non-numeric shape test 9 pins. (An empty PATH
+ * directory does not work: resolveGit falls back to /usr/bin/git.)
+ */
+export function makeEnoentGitShim(): string {
+  const dir = track(mkdtempSync(join(tmpdir(), 'atrium-shim-')))
+  writeFileSync(join(dir, 'git'), '#!/nonexistent/atrium-no-such-sh\n')
+  chmodSync(join(dir, 'git'), 0o755)
+  return dir
+}
+
+/**
+ * The recording wrapper test/rungit.test.ts uses, as a builder: appends one
+ * line per invocation (`$*`, the argv space-joined) to `logFile`, then execs
+ * the real binary. With `slowSubcommand`, an invocation naming that
+ * subcommand is recorded and then replaced by a 3 s sleep instead (the
+ * makeSlowGitShim shape), so a test can both time a call out AND count how
+ * many times it was attempted. Returns the directory to put on PATH.
+ */
+export function makeRecordingGitShim(realGit: string, logFile: string, slowSubcommand?: string, sleepBin = Bun.which('sleep')): string {
+  const dir = track(mkdtempSync(join(tmpdir(), 'atrium-shim-')))
+  const shim = join(dir, 'git')
+  let body = `#!/bin/sh\nprintf '%s\\n' "$*" >> ${logFile}\n`
+  if (slowSubcommand !== undefined) {
+    if (!sleepBin) throw new Error('makeRecordingGitShim: sleep not found on PATH')
+    body += `case " $* " in *" ${slowSubcommand} "*) exec ${sleepBin} 3 ;; esac\n`
+  }
+  body += `exec ${realGit} "$@"\n`
+  writeFileSync(shim, body)
+  chmodSync(shim, 0o755)
+  return dir
+}
+
+/** Reads a recording shim's log as one argv array per invocation (empty when the log does not exist). */
+export function readShimLog(logFile: string): string[][] {
+  if (!existsSync(logFile)) return []
+  return readFileSync(logFile, 'utf8').split('\n').filter((l) => l !== '').map((l) => l.split(' '))
 }
