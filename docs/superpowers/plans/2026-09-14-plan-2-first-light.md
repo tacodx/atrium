@@ -3345,6 +3345,81 @@ again) and comment it as an invariant; do not add a `runOnStart: true` schedule 
 coverage.
 | M20 | In `web/src/main.tsx`, remove the `p-4` class from the rendered root. | `bun run build && bun run assert:package` — "served CSS contains no Tailwind utility". *(Not a `bun test` failure: this gate has no caller until Task 10.)* |
 
+#### Task 6 addendum — the ports, every mutation row measured, and the failure-record channel on the WS wire
+
+> Recorded HERE, in the tracked plan, for the same reason Tasks 3–5's were: **Task 10 re-runs this
+> whole mutation table**, `.superpowers/sdd/` is gitignored, and a row that cannot redden its named
+> test would read as a regression when Task 10 runs it. Every row below was run on `a8552d2` plus
+> this task's commits, the plan's literal text first, on the FULL suite (`bun test`), by exact-string
+> replacement that refuses to apply unless every target occurs exactly once, then reverted with
+> `git checkout` and re-run green. Baseline 187 pass / 0 fail / 466 expect() across 13 files; exit
+> **205 / 0 / 561 across 15 files** (+18 tests: ten protocol, eight client). Every runtime mutant
+> typechecks (exit 0) except M10-literal, which does not compile.
+
+**Ports.** The table above and the test list say 7412–7421. **7412 was already taken** by Task 4's
+fix round (`test/serve.test.ts`, the malformed/unknown/replayed `POST /api/session` test). Task 6
+binds **7413–7421**: tests 1–7 → 7413–7419, test 17 → 7420, test 18 → 7421. There is no spare.
+
+**Pre-code audit (a8552d2).** Every serve.ts, wire.ts and web/ target string was absent — the only
+hits for `server.publish` and `scheduler.onUpdate` were inside the placeholder comment. M22's
+`const shutdown = () => { scheduler.stop(); cleanup() }` and M23's `last.set(providerId, wire)`
+existed, but tests 17 and 18 did not, so no row could redden before the code landed. The real
+measurement is the one below.
+
+| # | The plan says | Measured | The realisable row |
+|---|---|---|---|
+| M1 | `ws.subscribe(STATE_TOPIC)` into `websocket.open` → Test 1 on both assertions | **204 / 1** — exactly Test 1, on the first `subscriberCount` (`Expected: 0 / Received: 1`, :103); the frame assertion is not reached | as written |
+| M2 | swap the two `ws.send` calls → Test 2 | **203 / 2** — Test 2 (`Expected: "ready" / Received: "snapshot"`) **plus Test 6's M9 leg**, whose second socket also asserts `ready` first (`Received: "error"`). A first measurement reddened all seven `authedSocket` callers because the helper re-asserted the order; the helper now drains without asserting, so Test 2 owns the claim | as written |
+| M3 | ready/snapshot sends into `open` → Test 1 only; Test 2 stays green | **197 / 8.** Test 1 red as named (`- [] / + ["{type:ready}","{type:snapshot,…}"]`). **Plan 1's three zero-state tests in `test/serve.test.ts`** (`close(1008) on a bad first frame`, `when no frame is ever sent`, `oversized pre-auth frame`) are red on the same diff — the section's "turns none of Plan 1's tests red" is true of M1, not of M3. Tests 3, 5, 6, 18 are red as a **timing artefact of the mutant**: the two frames now arrive from `open()` before the server has processed the auth frame, so "drained" no longer means "subscribed" and `emit()` fires before the subscribe (`timed out waiting for frame 3; have 2`, and Test 5's count `Expected: 2 / Received: 1`). **Test 2 stays green**, exactly as the plan says | as written; expect eight, not one |
+| M4 | publish `{ data: status.data, schedules: {} }` → Test 3 | **204 / 1** — exactly Test 3 (`Expected to contain: "poll" / Received: []`) | as written |
+| M5 | withdrawn | Demonstration run anyway: publisher registered after `void scheduler.start()` → **205 / 0**, the whole suite green, as the honesty note predicts. No red recorded | withdrawn |
+| M6 | subscribe handler a no-op → Test 4 | **204 / 1** — exactly Test 4 (`Expected: 1 / Received: 2`) | as written |
+| M7 | publishes → loop over a never-pruned `Set` populated in the auth branch → Test 5, count 0 at both checkpoints | **Literal text keeps `ws.subscribe(STATE_TOPIC)`** (it only replaces the publishes), so `subscriberCount` is still 2 and **Test 5 stays GREEN**; the literal reddens only Test 4 (the loop ignores narrowing, `Received: 2`). **204 / 1** | **M7-realisable**: additionally replace `ws.subscribe(STATE_TOPIC)` in the auth branch with `live.add(ws)` — **202 / 3**: Test 5 as named (`Expected: 2 / Received: 0`), Test 2 (`subscriberCount` `Expected: 1 / Received: 0`) and Test 4. This is the row Task 10 should run |
+| M8 | bare `JSON.stringify` at the `onUpdate` call site → Test 6 | **204 / 1** — exactly Test 6 (`timed out waiting for frame 3`: the `TypeError` is swallowed by the listener's try/catch and no frame is sent) | as written |
+| M9 | bare `JSON.stringify` at the auth branch's `snapshot` site, wire value circular before auth | Not reachable from Test 6 as first written; Test 6 was **extended with the second socket** the plan describes. **204 / 1** — exactly Test 6, on that leg: `TypeError: JSON.stringify cannot serialize cyclic structures` escapes the message handler after `ready`, the error frame never arrives | as written, with the extension |
+| M10 | in `sendError`, `WIRE_ERROR_MESSAGES[code]` → `(e as Error).message` "from the JSON.parse catch" | **Cannot compile as written** — `e` is not in scope in `sendError`: `serve.ts(82,54): error TS2304: Cannot find name 'e'`. Run anyway: **203 / 2** — Test 7 AND `test/serve.test.ts`'s `a socket that authenticates stays open…` (a `ReferenceError` on every post-auth frame closes the socket) | **M10-realisable**: at the parse site, `catch (e) { ws.send(frameJson({ type: 'error', code: 'bad-frame', message: (e as Error).message })); return }` — **204 / 1**, exactly Test 7: `- "message": "malformed frame" / + "message": "JSON Parse error: Unexpected identifier "not""`. (`return ws.send(...)` fails tsc TS2322 because `ws.send` returns a number; use the statement form) |
+| M11 | delete the `registry.get(id)` check → Test 7 | **204 / 1** — exactly Test 7 (`timed out waiting for frame 5; have 4`) | as written |
+| M12 | `import { join } from 'node:path'` atop wire.ts → Test 8 | **204 / 1** — exactly Test 8 (`Expected: false / Received: true`). tsc exit 0 under the mutant — the compiler does not see this one | as written |
+| M13 | swap `clearHash()` / `await redeem()` → Test 9 | **204 / 1** — exactly Test 9 (`calls` order) | as written |
+| M14 | stored-token read first, early return → Test 10 | **203 / 2** — Test 10 (`Expected: "fresh-token" / Received: "stale-token"`) **plus Test 11** (`cleared` `Expected: 1 / Received: 0`: the early return skips the scrub as well) | as written; expect two |
+| M15 | delete the `HANDOFF_RE.test` guard → Test 11 | **204 / 1** — exactly Test 11 (`redeemed` `+ ["<script>alert(1)</script>"]`) | as written |
+| M16 | remove the 1008 special case → Test 12 | **204 / 1** — exactly Test 12 (`authFailures` `Expected: 1 / Received: 0`) | as written |
+| M17 | delete the `Math.min` cap → Test 13 | **204 / 1** — exactly Test 13 (`- 11250, - 11250 / + 12000, + 24000`), the values the plan predicts | as written |
+| M18 | `getSnapshot: () => ({ ...state })` → Test 14 | **204 / 1** — exactly Test 14 (`Received: serializes to the same string`) | as written |
+| M19 | rebuild `providers` from scratch → Test 15 | Realised as `providers: structuredClone({ ...state.providers, [id]: status })`. **204 / 1** — exactly Test 15 on the `providers.b` identity | the `structuredClone` form |
+| M21 | `setConnected(false)` also resets `hasSnapshot` → Test 16 | **First measurement 205 / 0 — GREEN.** Test 16 as written calls `setConnected(false)` on a fresh store that is already disconnected, and the "notify not at all when nothing changed" rule this section itself requires makes that a no-op: the mutant line never runs. Test 16 now calls `setConnected(true)` first. Re-measured: **204 / 1**, exactly Test 16 (`hasSnapshot` `Expected: true / Received: false`) | as written, against the strengthened Test 16 |
+| M22 | `originalStop()` before `scheduler.stop()` in the stop wrapper → Test 17 | **205 / 0 — GREEN**, and it cannot be otherwise: both calls are synchronous and land in the same tick, so nothing resumes between them and the ORDER is unobservable — from this task or any other. What Test 17 pins is that `scheduler.stop()` runs on the stop path at all | **M22-realisable**: `const shutdown = () => { cleanup() }` — **201 / 4**: Test 17 as named (frames `Expected: 2 / Received: 3` — the in-flight run publishes its `update` to the still-open socket after `server.stop()`), plus `test/serve-providers.test.ts`'s `server.stop() stops the scheduler`, `a process with a registered provider exits after stop()`, and `SIGTERM stops the scheduler…`. Task 10 should run this form and expect four |
+| M23 | scheduler.ts `last.set(providerId, data)` → Test 18 | **201 / 4** — Test 18 as named (`+ "token": "atrium-redaction-sentinel-9f2c41"` in `.data`), Task 5's two (`contract.test.ts:333`, `routes.test.ts:155`, as in Task 5's M1) **plus Test 6**: with raw Data in `last` the circular wire value never reaches a frame, so no `unserializable` error is produced (`Received: { type: "update", … }`). Four red, all consistent with the mutation; scheduler.ts reverted, never committed | as written; expect four |
+| M20 | remove `p-4` from the rendered root → `assert:package` fails | **First measurement GREEN, CSS byte-identical (same hash).** The explanatory comment in `main.tsx` spelled `p-4`, and **Tailwind v4's scanner reads candidates out of comments**, so the utility was still emitted with the attribute gone. The comment was reworded (`b930a04`) to not spell the class. Re-measured with `grep -c 'p-4' web/src/main.tsx` = 0 under the mutant: `PACKAGING ASSERTION FAILED: - served CSS contains no Tailwind utility — v3 config artifacts?`, exit 1, CSS 4.09 kB; reverted → `packaging ok`, exit 0. Run ONLY as `RD=$(mktemp -d) && XDG_RUNTIME_DIR=$RD bun run build && XDG_RUNTIME_DIR=$RD bun run assert:package; rm -rf $RD` — `scripts/assert-package.ts:48` spawns the binary with no `XDG_RUNTIME_DIR` of its own and would otherwise write a live handoff into the operator's real runtime dir | as written, provided `p-4` occurs exactly once in `web/src/` — Task 10 must grep before trusting the row |
+
+**Other corrections to the section, all applied.**
+
+- **Test 11 vs. Step C's `acquireToken` order.** Step 2 scrubs only when the handoff parses; Test 11
+  requires `clearHash` to be called on a junk fragment. Shipped: any non-empty fragment is scrubbed,
+  only one matching `HANDOFF_RE` is redeemed; M13's swap target is unchanged inside the parsed branch.
+- **The boot handoff is single-use**, so a test with two sockets (5, 6) calls `openSession` once and
+  shares the token: `authedSocket(port, token)`, not `(port, scratch)`.
+- **Test 2's "fixture with Data set to `{ n: 1 }`"** needs a run to have happened: a provider that has
+  neither succeeded nor failed has no snapshot entry, so the test drives one `emit()` and waits for
+  `fetchCount >= 1` before authenticating.
+- "The two lines in `serve.ts` that read `scheduler.snapshot()`" — one existed (the routes ctx); the
+  second is the one this task adds in the auth branch.
+- `ScheduleHealth` IS exported from `scheduler.ts` (:11); the drift guard covers `ProviderStatus`,
+  which nests it structurally, so both shapes are pinned by the two assignments.
+- expect() count before any edit: 466 in the brief and in my first run, 467 once after the serve.ts
+  commit with no test file touched — the variance lives in existing polling tests, not here.
+
+**G5 — the failure-record channel now reaches the WS wire; recorded, not fixed.** The Task 5
+addendum records that `schedules.*.lastErrorMessage` carries a provider exception's `.message`
+verbatim, outside `toClient`, into `/api/state`. This task's `update` frame carries the whole
+`ProviderStatus` (required above, for Task 9's unavailable-vs-zero check) and the `snapshot` frame
+carries every provider's, so the same text now reaches both WS frames. `scheduler.ts` is forbidden
+here and a wire-side sanitizer would be the second redaction site this plan forbids. **Test 18
+asserts only that the Data sentinel is absent from `.data`; its body says in words that it does not
+cover exception text, and it must not be cited as if it did.** Owner: a plan-level ruling — sanitize
+at `recordFailure`, or replace the message with a closed-set code plus a server-side message.
+Carried forward to Task 10.
+
 ---
 
 ## Out of scope for this task
