@@ -224,6 +224,11 @@ test('a snapshot frame latches hasSnapshot, and a disconnect does not clear it',
   // Task 9 renders `loading` off this flag, so clearing it on a disconnect
   // flashes a populated pane back to a spinner on every reconnect.
   // MUTATION M21: reset hasSnapshot to false in setConnected(false).
+  // The connect step is NOT optional: a fresh store is already disconnected,
+  // and setConnected(false) on it is a no-op through the "notify only when
+  // something changed" guard — measured, M21 stayed green without it.
+  store.setConnected(true)
+  expect(store.getSnapshot().connected).toBe(true)
   store.setConnected(false)
   expect(store.getSnapshot().connected).toBe(false)
   expect(store.getSnapshot().hasSnapshot).toBe(true)
