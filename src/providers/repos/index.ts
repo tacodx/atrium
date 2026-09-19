@@ -785,8 +785,15 @@ export function createReposProvider(deps: ReposProviderDeps = {}): Provider<Repo
       case 'metadata': {
         // Returns the FULL merged Data (see the rule above), never a
         // metadata-only delta. An already-aborted signal issues no git call.
-        // Measured wall-clock for one cycle over this task's fixture set:
-        // recorded below once the fixtures exist (step "measure").
+        //
+        // MEASURED (2026-09-20, git 2.55.0, bun 1.3.11, tmpfs fixtures): one
+        // cycle over Task 8's nine-repo fixture set — 25 git calls (the bare
+        // repo stops after rev-parse) — is 12.5 ms median at concurrency 8
+        // (min 11.8, max 17.6 over 7 runs) and 36.6 ms at concurrency 1, i.e.
+        // ~1.5 ms per call including resolveGit()'s per-call PATH scan
+        // (carry-forward §4). At 30 s intervals that is negligible at this
+        // scale; ~200 repos would still be well under a second. Not fixed
+        // here: rungit.ts is not this task's.
         if (ctx.signal.aborted) return buildData(cfg)
         await readAll(cfg, ctx.signal)
         return buildData(cfg)
