@@ -124,9 +124,15 @@ export function createScheduler(registry: Registry, opts: { config: Readonly<Rec
   }
 
   /**
-   * One provider's envelope, freshly allocated — never the live record objects,
-   * so a consumer cannot mutate the scheduler's state through it. undefined for
-   * a provider that has neither succeeded nor failed.
+   * One provider's envelope. The envelope and every `schedules[name]` record
+   * are freshly allocated per call — never the live health records — so a
+   * consumer cannot mutate the scheduler's health through it. `.data` is NOT
+   * copied: it is the stored client value itself (`last.get`), shared by
+   * design, so that snapshot()'s `.data` and the onUpdate payload's `.data`
+   * are one object — the "computed once" identity test/contract.test.ts pins
+   * with `toBe`. A consumer that writes to `.data` changes the next
+   * /api/state body; consumers must treat it as read-only. undefined for a
+   * provider that has neither succeeded nor failed.
    *
    * Split out of buildSnapshot() because notify() needs exactly one provider's
    * envelope: building all of them and discarding the rest is free with one
