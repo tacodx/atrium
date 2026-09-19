@@ -3,6 +3,8 @@ import { createRegistry } from '../src/core/registry'
 import { createScheduler } from '../src/core/scheduler'
 import type { Provider } from '../src/core/contract'
 
+const SENTINEL = 'atrium-redaction-sentinel-9f2c41'
+
 const stub = (id: string, overrides: Partial<Provider<any, any>> = {}): Provider<any, any> => ({
   id,
   configSchema: { parse: (x: any) => x } as any,
@@ -298,5 +300,86 @@ describe('scheduler', () => {
     } finally {
       process.off('unhandledRejection', onUnhandledRejection)
     }
+  })
+
+  // Task 5. The redaction seam, pinned from the scheduler side. Mutations
+  // named per assertion below; the /api/state serialization half is in
+  // test/routes.test.ts, and the WS-frame half is Task 6's.
+  test('the client value is the redacted one — a Data sentinel reaches neither snapshot() nor an onUpdate listener', async () => {
+    const r = createRegistry()
+    r.register(stub('repos', {
+      schedules: [{ name: 'poll', intervalMs: 3_600_000, runOnStart: false }],
+      fetch: async () => ({ root: '/home/someone/src', token: SENTINEL, count: 2 }),
+      toClient: (d: any) => ({ count: d.count }),      // allowlist, field by field
+    }))
+
+    const s = createScheduler(r, { config: { repos: {} } })
+    const pushed: unknown[] = []
+    s.onUpdate((_id, data) => pushed.push(data))
+
+    const raw = await s.runNow('repos', 'poll')
+
+    // Positive shape FIRST. A negative-only assertion passes just as happily
+    // when the value is empty or missing, which is exactly how a redaction test
+    // becomes a test that cannot fail.
+    //
+    // NOTE the envelope: Task 2 made snapshot() return
+    // Record<providerId, { data?, schedules }>, and made the onUpdate payload
+    // that same per-provider envelope. Assert on `.data`, never on the envelope
+    // as a whole — `schedules` carries a live health record.
+    //
+    // M1 (redaction removed from the write path): both `.data` reads see the
+    // raw object and the two toEqual lines go red on `root`/`token`.
+    expect((s.snapshot() as any).repos.data).toEqual({ count: 2 })
+    expect(pushed).toHaveLength(1)
+    expect((pushed[0] as any).data).toEqual({ count: 2 })
+    expect(JSON.stringify(s.snapshot())).not.toContain(SENTINEL)
+    expect(JSON.stringify(pushed)).not.toContain(SENTINEL)
+
+    // Computed once: the value /api/state serves and the value pushed to the
+    // socket are the SAME object, not two independent toClient calls. The
+    // identity is on `.data`, because Task 2's snapshot() allocates a fresh
+    // envelope per call while `last.get(providerId)` returns the one stored
+    // client value — which is exactly the property being pinned.
+    //
+    // M4 (computed twice — the listener given its own p.toClient(data)): equal
+    // but not identical, and only this line goes red.
+    expect((pushed[0] as any).data).toBe((s.snapshot() as any).repos.data)
+
+    // runNow's own resolution stays RAW — internal, never serialized.
+    expect((raw as any).token).toBe(SENTINEL)
+  })
+
+  test('a provider with no toClient fails the run instead of publishing raw Data', async () => {
+    const r = createRegistry()
+    const p = stub('broken', {
+      schedules: [{ name: 'poll', intervalMs: 3_600_000, runOnStart: false }],
+      fetch: async () => ({ token: SENTINEL }),
+    })
+    // A hand-written JS provider, or a future `p.toClient?.(data) ?? data`
+    // fallback quietly reintroducing optionality. Either way the run must fail
+    // loudly rather than publish Data.
+    delete (p as any).toClient
+
+    r.register(p)
+    const s = createScheduler(r, { config: { broken: {} } })
+    const pushed: unknown[] = []
+    s.onUpdate((_id, status) => pushed.push(status))
+
+    // M3 (optionality reintroduced: `toClient?` on the contract and
+    // `p.toClient ? p.toClient(data) : data` in the scheduler) and M1 (no call
+    // site left at all): the run resolves instead of rejecting, and this line
+    // goes red before any of the ones below.
+    await expect(s.runNow('broken', 'poll')).rejects.toThrow()
+
+    // No client value was ever published for this provider. Task 2's catch arm
+    // DOES record a failure and DOES notify, so `snapshot()` is not `{}` here and
+    // `notified` is not 0 — assert the property that actually matters instead:
+    // nothing carrying Data reached either wire.
+    expect((s.snapshot() as any).broken?.data).toBeUndefined()
+    expect((s.snapshot() as any).broken?.schedules.poll?.consecutiveFailures).toBe(1)
+    expect(pushed.every(st => (st as any)?.data === undefined)).toBe(true)
+    expect(JSON.stringify(s.snapshot())).not.toContain(SENTINEL)
+    expect(JSON.stringify(pushed)).not.toContain(SENTINEL)
   })
 })
