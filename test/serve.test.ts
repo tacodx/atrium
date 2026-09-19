@@ -596,6 +596,22 @@ test('atrium open --print-url prints the boot handoff from the file and does not
   }
 })
 
+// Three mutations, one per assertion group in this test, all run RED then
+// GREEN. Each is type-clean, which is the point — a mutation tsc would reject
+// is one CI catches anyway:
+//   (1) `process.exit(69)` -> `process.exit(1)` in the missing-file branch of
+//       src/index.ts's `case 'open'`. EX_UNAVAILABLE is the contract a
+//       launcher and a systemd unit key off; a generic 1 says nothing.
+//   (2) delete the `if (!argv.includes('--print-url'))` block. `atrium open`
+//       with no flag then falls through to reading the handoff file, misses,
+//       and exits 69 about a server instead of 64 with a usage line.
+//   (3) the missing-file message onto stdout, in two spellings. stdout is what
+//       a launcher consumes — `xdg-open "$(atrium open --print-url)"` feeds it
+//       straight to a browser — so an error line there becomes a URL argument.
+//       `console.error` -> `console.log` reddens the stderr assertion first;
+//       ECHOING to both streams leaves stderr correct and reddens the stdout
+//       `toBe('')` alone, which is how that assertion was shown to be doing
+//       work rather than decorating.
 test('atrium open fails cleanly with no server and with no --print-url', async () => {
   const scratch = runtimeScratch()   // deliberately empty: no server ever started here
   const env = { ...process.env, XDG_RUNTIME_DIR: scratch, XDG_CONFIG_HOME: emptyConfigHome() }
