@@ -5802,3 +5802,74 @@ discovery can overlap a 30-second metadata pass; the metadata pass snapshots `[.
 at its start and writes into those entry objects, which discovery may meanwhile have replaced. The
 carry-over on rebuild means the next metadata cycle heals it; nothing is lost except at most one
 cycle's freshness on the overlapped rows. Not a defect in this task's scope; recorded.
+
+**Fix round (F1–F4), on `1bafb8c`.** Both review lenses returned 0 Important; these are the four
+minors, one commit each, three files only (`src/providers/repos/index.ts`,
+`test/repos-metadata.test.ts`, this addendum). Baseline re-verified before the first edit:
+**264 pass / 0 fail / 800 expect() across 17 files**, `bun run typecheck` exit 0, tree clean. Exit:
+**266 / 0 / 807** (+2 tests, both F2's).
+
+- **F1 — operator-affecting, and the reason this round exists.** Every test that dispatched a repos
+  action passed `{ cfg }` only, so `DispatchOptions.launcher` (`src/core/actions.ts:64`) fell back to
+  its `'systemd-run'` default. Those dispatches are all expected to REJECT — but **Task 10 re-runs
+  M2 and M3, which delete exactly the check that makes them reject**, and `spawnDetached` would then
+  have opened a real editor or terminal on the operator's desktop, once per case, from a test run.
+  All five dispatches now pass an explicit inert launcher (`INERT_LAUNCHER = '/bin/false'`,
+  `test/repos-metadata.test.ts:432`, with the reasoning in its doc comment). `/bin/false` is chosen
+  because it STARTS and then exits 1: `spawnDetached`'s fallback keys on the `error` event — failing
+  to start — never on the exit status (`actions.ts:104-108`), so a path that does not exist would be
+  strictly worse than the default, not safer. **M2 re-run to confirm** (`renderTemplate(cfg[key],
+  (target as {path: string}).path)`, the `resolveTarget` call dropped from each `argv`): typecheck 0,
+  **RED 261 / 3**, tests 18, 19 and 20 exactly as first measured, and NOTHING launched — the
+  `code`/`konsole` process counts were identical before and after, and a second run with the launcher
+  temporarily pointed at a recording script captured what the default would have been handed:
+  `--user --scope --quiet --collect -- code -- /tmp/not-a-discovered-repo` and
+  `--user --scope --quiet --collect -- konsole --separate --workdir <root>/umb/child`. Reverted;
+  green. **Task 10: this is a property of the tests, not of the mutants — keep the explicit launcher
+  on any dispatch added later.**
+- **F2 — the rebasing path could put a second line on the wire as a branch name**
+  (`src/providers/repos/index.ts:519`). `head-name` is read with a trim, which strips the ENDS only,
+  so `refs/heads/evil\nSECOND\n` yielded the two-line branch `evil\nSECOND`. Fixed: take the FIRST
+  line, and treat `'(detached)'` or an empty name as NO branch — which also makes `resolveBranch`'s
+  stated never-`'(detached)'`, never-`''` promise true on the rebasing path and not only on the plain
+  one (L2-F2). Two new tests (`test/repos-metadata.test.ts:128` and `:143`) written BEFORE the guard:
+  full-suite **RED 264 / 2 / 804**, then **GREEN 266 / 0 / 807**. **MUTATION (drop the first-line
+  split)** re-run against the committed guard: typecheck 0, **RED 265 / 1 / 806** on `a multi-line
+  rebase head-name yields only its first line as the branch` (`Expected - 1 / Received + 2`), revert
+  **GREEN 266 / 0 / 807**. The `(detached)`/empty test stays green under that mutation by design —
+  it pins the other half of the guard.
+- **F3 — `Number('')` is 0** (`src/providers/repos/index.ts:722`), so an exit-0 log with EMPTY stdout
+  would have stored `lastCommitAt = 0`, a real-looking 1970 timestamp, where the honest answer is
+  "unknown". Guarded on trimmed-empty stdout. **No mutation is recorded for this row and none can be:**
+  on the 2.55 binary measured here, `-1 --format=%ct` either prints a timestamp or exits 128, so the
+  shape is unreachable and no test can observe it. The comment in the source names that reason.
+  Task 10 should NOT expect a red row here.
+- **F4 — a mis-annotation, now corrected.** Test 15 (`an unavailable repo emits no branch, no count
+  and no time on the wire`) carried the header `M12, M13`; the measured table shows it stays GREEN
+  under both — `setUnavailable` DELETES rather than assigning `undefined`, so a `{ ...entry }` wire
+  cannot resurrect the keys, and a bare repo never held values for M13 to keep. The mutation that
+  reddens it is **M4** (the bare gate removed: status runs, exits 128, the repo reads `git-error`
+  instead of `bare`). The header now names M4 and names the real pins for the other two: test 16 plus
+  discovery's test 29 (M12), and test 8 (M13).
+
+**G5 citation correction.** The brief's G5 line numbers for the tripwire were stale. As shipped:
+`GIT_LITERAL` is `test/rungit.test.ts:360`, and the two whole-tree tripwire tests are `:384`
+(`no source file calls git outside runGit`) and `:469` (`the real src/ tree is clean under all four
+layers`). Both are green with `src/providers/repos/actions.ts` present and with F2's and F3's new
+comments in `index.ts` — the scan reads raw text, comments included, so no source comment under
+`src/` may quote the bare binary name.
+
+**Carried forward to Task 10.**
+
+1. **`buildArgv`'s `GIT_COMMAND` regex (`src/core/actions.ts:14`) matches only a final path segment
+   equal to the binary name,** so it does NOT match the git-core helper binaries — verified against
+   the regex: `/usr/libexec/git-core/git-log` and `/usr/libexec/git-core/git-status` both return
+   `false`, while `git` and `/usr/bin/git` return `true`, and those helpers exist on this machine.
+   An operator who configured one of them as `repos.editor.cmd` would reach `spawnDetached` with no
+   hardening prefix and no env allowlist — i.e. the §8.6 bypass the guard exists to prevent, one
+   rename away. Operator-config only (no client input reaches `cmd`), and `src/core/actions.ts` is
+   not Task 8's file, so it is **not fixed here**: Task 10 or a ruling.
+2. **Stale fixture directories leak from the older suites.** `ls -d /tmp/atrium-* | wc -l` = **6152**
+   at the end of this round. `test/repos-metadata.test.ts` and the Task 7 discovery suite drain their
+   own via `cleanupFixtures`; the leak is `test/rungit.test.ts` and `test/actions.test.ts`, which
+   were explicitly out of scope for T7 and T8 (carry-forward P3). **Task 10 hygiene.**
