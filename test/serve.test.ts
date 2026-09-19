@@ -321,6 +321,13 @@ test('a handoff redeemed at POST /api/session returns a session token that is ac
     // between the page and the server, and the suite stays green without this.
     expect(res.headers.get('cache-control')).toBe('no-store')
     expect(res.headers.get('content-security-policy')).toContain("frame-ancestors 'none'")
+    // SECURITY_HEADERS defines FOUR; the two above pinned half of them here.
+    // Measured: the credential shipping with only cache-control and CSP left
+    // the suite at 184/0. MUTATION: replace `{ headers }` on that Response.json
+    // with an object carrying only 'cache-control' and 'content-security-policy'
+    // — these two lines redden, the two above stay green.
+    expect(res.headers.get('x-content-type-options')).toBe('nosniff')
+    expect(res.headers.get('referrer-policy')).toBe('no-referrer')
 
     // THE assertion this whole task exists for. MUTATION: the bearer branch to
     // `if (true)`. Nothing else in the suite presents a valid bearer, so
