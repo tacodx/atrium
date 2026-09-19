@@ -32,8 +32,24 @@ function emptyConfigHome(): string {
 }
 afterAll(() => { for (const d of emptyConfigHomes) rmSync(d, { recursive: true, force: true }) })
 
+// The six servers below never read back handoff.json or endpoint.json, so they
+// were written with no `env` at all — which resolved them through the
+// DEVELOPER'S REAL $XDG_RUNTIME_DIR. Measured on the pre-fix tree with a live
+// server's two files planted there: `bun test test/serve.test.ts` overwrote
+// both with this process's own (so the pid-ownership guard in cleanup matched),
+// then DELETED them on stop(), and forced the directory 0755 -> 0700. The
+// visible consequence is `atrium open --print-url` exiting 69 against a server
+// that is still running, with no way to authenticate a new browser profile
+// until it restarts. Task 4 Step 10 states the rule; it was applied to the ten
+// new tests below and not to the six older ones above them.
+//
+// One shared directory is enough precisely because none of the six inspects
+// what it writes. Every test that DOES inspect takes its own scratch dir.
+const SHARED_RD = mkdtempSync(join(tmpdir(), 'atrium-shared-rd-'))
+afterAll(() => rmSync(SHARED_RD, { recursive: true, force: true }))
+
 test('/healthz is unauthenticated but still gated', async () => {
-  const s = await startServer({ port: 7391 })
+  const s = await startServer({ port: 7391, env: { XDG_RUNTIME_DIR: SHARED_RD } })
   const ok = await fetch('http://127.0.0.1:7391/healthz', { headers: { host: '127.0.0.1:7391' } })
   expect(ok.status).toBe(200)
   const body = await ok.json()
@@ -46,14 +62,14 @@ test('/healthz is unauthenticated but still gated', async () => {
 })
 
 test('a token-gated route rejects a request with no bearer', async () => {
-  const s = await startServer({ port: 7392 })
+  const s = await startServer({ port: 7392, env: { XDG_RUNTIME_DIR: SHARED_RD } })
   const res = await fetch('http://127.0.0.1:7392/api/state', { headers: { host: '127.0.0.1:7392' } })
   expect(res.status).toBe(401)
   s.stop()
 })
 
 test('every response carries the standard security headers', async () => {
-  const s = await startServer({ port: 7393 })
+  const s = await startServer({ port: 7393, env: { XDG_RUNTIME_DIR: SHARED_RD } })
   const res = await fetch('http://127.0.0.1:7393/healthz', { headers: { host: '127.0.0.1:7393' } })
   expect(res.headers.get('x-content-type-options')).toBe('nosniff')
   expect(res.headers.get('referrer-policy')).toBe('no-referrer')
@@ -89,7 +105,7 @@ test('a port collision exits 78, not a restart loop', async () => {
 // to), so this is where it gets proven.
 
 test('websocket: zero state before auth, and close(1008) on a bad first frame', async () => {
-  const s = await startServer({ port: 7395 })
+  const s = await startServer({ port: 7395, env: { XDG_RUNTIME_DIR: SHARED_RD } })
   const received: unknown[] = []
   const closeCode = await new Promise<number>((resolve, reject) => {
     const ws = connectWs('ws://127.0.0.1:7395/ws', 'http://127.0.0.1:7395')
@@ -105,7 +121,7 @@ test('websocket: zero state before auth, and close(1008) on a bad first frame', 
 
 test('websocket: zero state before auth, and close(1008) when no frame is ever sent', async () => {
   // wsAuthTimeoutMs shortened so the test doesn't wait out the real (spec §8.4) 2s window.
-  const s = await startServer({ port: 7396, wsAuthTimeoutMs: 150 })
+  const s = await startServer({ port: 7396, wsAuthTimeoutMs: 150, env: { XDG_RUNTIME_DIR: SHARED_RD } })
   const received: unknown[] = []
   const closeCode = await new Promise<number>((resolve, reject) => {
     const ws = connectWs('ws://127.0.0.1:7396/ws', 'http://127.0.0.1:7396')
@@ -127,7 +143,7 @@ test('websocket: zero state before auth, and close(1008) when no frame is ever s
 // parsed as JSON, never gets a chance to do anything) and the connection does not survive.
 
 test('websocket: an oversized pre-auth frame is rejected, never reaches the app', async () => {
-  const s = await startServer({ port: 7397 })
+  const s = await startServer({ port: 7397, env: { XDG_RUNTIME_DIR: SHARED_RD } })
   const received: unknown[] = []
   const ended = await new Promise<'closed' | 'errored'>((resolve, reject) => {
     const ws = connectWs('ws://127.0.0.1:7397/ws', 'http://127.0.0.1:7397')
