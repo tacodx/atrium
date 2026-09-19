@@ -14,11 +14,15 @@ const store = createStore()
 // silent, and scripts/assert-package.ts uses fetch — never a browser — so it
 // can structurally never observe a CSP violation.
 //
-// The literal `p-4` on the root element below is LOAD-BEARING: it is the one
-// utility class in the tree, `.p-4{padding:calc(var(--spacing) * 4)}` is the
-// only thing satisfying scripts/assert-package.ts's "served CSS contains a
-// Tailwind utility" check, and dropping it fails the release gate with a
-// message blaming a Tailwind config problem that does not exist (mutation M20).
+// The padding utility on the root element below (the className on the <div>)
+// is LOAD-BEARING: it is the one utility class in the tree, its emitted rule
+// `padding:calc(var(--spacing) * 4)` is the only thing satisfying
+// scripts/assert-package.ts's "served CSS contains a Tailwind utility" check,
+// and dropping it fails the release gate with a message blaming a Tailwind
+// config problem that does not exist (mutation M20). This comment deliberately
+// does NOT spell the class name: Tailwind v4 scans source text, comments
+// included, for candidates — measured: with the name spelled here, removing
+// the attribute left the built CSS byte-identical and the gate green.
 
 function App() {
   // THE live-state call site. Task 9 replaces the <pre> here; there is no
