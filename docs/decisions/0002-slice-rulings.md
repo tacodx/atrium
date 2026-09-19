@@ -325,7 +325,8 @@ rather than inheriting `createAuth`'s 60s default.
 `/proc/<pid>/cmdline`**, which is world-readable on a default Linux with no `hidepid`. This handoff is never in a
 URL until the user's own `atrium open --print-url` puts it there. Between mint and that moment it exists in
 exactly two places — the server's in-process `Map`, and a 0600 file inside a 0700 directory. Neither is readable
-by another uid, so the window that §8.3 is shortening is not open.
+by another uid, so the window that §8.3 is shortening is not open — already partly false; see the revisit
+trigger at the end of this section.
 
 A 60s window instead has a concrete failure: a systemd-started server's handoff is **dead before the user reaches
 a browser**. That is the failure mode this ruling trades against, and it is the more likely one.
@@ -352,8 +353,10 @@ re-taken rather than inherited.
 The exposed case is narrow and worth naming: **a handoff that is launched and never redeemed.** A redeemed
 handoff is deleted from the map as it is traded, so the window closes on first use however long the TTL says; one
 that is printed into a command line and then never traded stays live for seven days, with its value sitting in a
-world-readable `cmdline` for as long as that process runs. No constant changes here — the trigger is what was
-missing.
+world-readable `cmdline` for as long as that process runs. It is not the only case, and the sentence above read as
+if it were: the other is the race between argv exposure and the browser's redemption, in which another local uid
+reads `/proc/<pid>/cmdline` and POSTs `/api/session` first — a case that exists identically under a 60s TTL, and
+is what §8.3's "briefly visible" means. No constant changes here — the trigger is what was missing.
 
 ### Accepted residual — one boot handoff means one browser profile per server start
 
