@@ -83,6 +83,18 @@ const PRUNE_DIR_NAMES = new Set(['node_modules'])
 
 interface ScanState {
   candidates: Set<string>
+  /**
+   * Roots that are NOT structurally candidates (no .git, not bare-shaped) but
+   * are still put through the gate. An operator-named extraRoot such as
+   * `/home/u/proj/src` has no .git of its own yet rev-parse exits 0 there
+   * with the ANCESTOR's gitdir (measured), and the containment comparison is
+   * what must drop it — so the gate has to see it. A probe root whose
+   * rev-parse exits non-zero is simply a directory of projects (or $HOME
+   * itself, 128 for every non-yadm user) and is not reported: it is not a
+   * broken repository, and a `dropped` row naming every user's home would be
+   * a factual wrong answer on every dashboard.
+   */
+  probes: Set<string>
   errors: ReposErrorCode[]
 }
 
@@ -104,12 +116,13 @@ function walkDir(dir: string, depth: number, cfg: ReposConfig, state: ScanState,
 
   const bare = !existsSync(join(dir, '.git')) && isBareShape(dir)
   if (existsSync(join(dir, '.git')) || bare) {
-    const real = safeRealpath(dir)
-    if (real !== undefined) state.candidates.add(real)
+    state.candidates.add(dir)
     // A bare repo's objects/ and refs/ subtrees are not projects. A non-bare
     // candidate IS descended into: nested repos are the whole point of the
     // container rule.
     if (bare) return
+  } else if (depth === 0) {
+    state.probes.add(dir)
   }
 
   if (depth >= MAX_SCAN_DEPTH) return
@@ -137,7 +150,7 @@ function walkDir(dir: string, depth: number, cfg: ReposConfig, state: ScanState,
 }
 
 function scanRoots(roots: string[], cfg: ReposConfig, signal: AbortSignal): ScanState {
-  const state: ScanState = { candidates: new Set(), errors: [] }
+  const state: ScanState = { candidates: new Set(), probes: new Set(), errors: [] }
   const seen = new Set<string>()
   for (const root of roots) {
     if (signal.aborted) break
@@ -163,6 +176,7 @@ interface GateResult {
 type Verdict =
   | { kind: 'valid'; entry: GateResult }
   | { kind: 'dropped'; path: string; reason: DropReason }
+  | { kind: 'skip' } // a probe root that is not inside any repository (see ScanState.probes)
 
 function isCodeZero(code: number | string): boolean {
   // `code` can be the STRING 'ENOENT' when the child never started; narrow
@@ -178,10 +192,10 @@ function isCodeZero(code: number | string): boolean {
  * Accept only when the gitdir belongs to this candidate, or the candidate
  * carries a .git FILE (linked worktree / submodule — the classifier decides).
  */
-async function gate(candidate: string, timeoutMs: number): Promise<Verdict> {
+async function gate(candidate: string, timeoutMs: number, probe: boolean): Promise<Verdict> {
   const r = await runGit(candidate, ['rev-parse', '--absolute-git-dir'], { timeoutMs })
   if (r.timedOut) return { kind: 'dropped', path: candidate, reason: 'timed-out' }
-  if (!isCodeZero(r.code)) return { kind: 'dropped', path: candidate, reason: 'invalid' }
+  if (!isCodeZero(r.code)) return probe ? { kind: 'skip' } : { kind: 'dropped', path: candidate, reason: 'invalid' }
 
   const raw = r.stdout.trim()
   const gitDir = safeRealpath(raw) ?? raw
@@ -306,13 +320,15 @@ async function discover(cfg: ReposConfig, deps: Required<ReposProviderDeps>, sig
   const scan = scanRoots(roots, cfg, signal)
   const errors: ReposErrorCode[] = [...scan.errors]
   const dropped: DroppedCandidate[] = []
-  const candidates = [...scan.candidates].sort()
+  // Walked paths are already realpath-resolved: every root is, and symlinks
+  // are never followed. Sorted ascending: the determinism the tests rely on.
+  const candidates = [...new Set([...scan.candidates, ...scan.probes])].sort()
 
   // One bad repository must never abort the scan: a candidate that throws
   // anything unexpected is recorded on the closed-set channel and dropped.
   const verdicts = await mapBounded(candidates, CLASSIFY_CONCURRENCY, signal, async (c): Promise<Verdict> => {
     try {
-      return await gate(c, deps.classifyTimeoutMs)
+      return await gate(c, deps.classifyTimeoutMs, !scan.candidates.has(c))
     } catch {
       errors.push('candidate-error')
       return { kind: 'dropped', path: c, reason: 'invalid' }
@@ -321,7 +337,7 @@ async function discover(cfg: ReposConfig, deps: Required<ReposProviderDeps>, sig
 
   const valid: GateResult[] = []
   for (const v of verdicts) {
-    if (v === undefined) continue
+    if (v === undefined || v.kind === 'skip') continue
     if (v.kind === 'dropped') dropped.push(droppedEntry(v.path, v.reason))
     else valid.push(v.entry)
   }
