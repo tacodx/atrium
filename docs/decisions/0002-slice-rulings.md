@@ -380,7 +380,31 @@ that one — a future `atrium doctor` is the place both get checked.
   line), every static asset, `POST /api/session` itself, and the `/ws` upgrade — which any local process can
   reach with a forged Host/Origin and hold for up to `DEFAULT_WS_AUTH_TIMEOUT_MS`, receiving **zero** application
   data, which is the control that makes a forgeable Origin survivable (§8.4).
-- **Comparison is `===` on strings and `Map.get` on the handoff — not constant-time.** Out of scope by the task's
-  own ruling, and the reasoning is that the boundary here is the **uid**, not the comparison: a same-uid process
-  can read the 0600 file outright, so a timing side channel is never the cheapest attack available. Revisit only
-  if either token ever becomes reachable across a uid boundary.
+- **Comparison is `===` on strings and `Map.get` on the handoff — not constant-time.** Out of scope, and that
+  conclusion stands — but the reason first recorded here is wrong, and is corrected in place rather than removed.
+
+  It said the boundary is the **uid**: "a same-uid process can read the 0600 file outright, so a timing side
+  channel is never the cheapest attack available." That does not describe the attacker who can actually reach
+  these comparisons. **Loopback is interface-scoped, not uid-scoped.** A different-uid local process can open a
+  socket to 127.0.0.1, forge Host and Origin, and time `POST /api/session` and a bearer request, while being
+  unable to read the 0600 file or to `ptrace` the process. So the trigger as first written — "revisit only if
+  either token ever becomes reachable across a uid boundary" — **is already satisfied today**.
+
+  What the ruling actually rests on, keeping two things apart that the first version ran together:
+
+  - **Guessing** is out of reach on entropy alone. Both tokens are 32 bytes from `crypto.getRandomValues` —
+    **256 bits**, CSPRNG, re-minted on every server start.
+  - **Measuring** is the part a non-constant-time compare actually exposes, and what it exposes is a prefix, one
+    byte at a time. Entropy does not help there; the noise floor does. The per-byte signal is a few nanoseconds
+    of string comparison, under a loopback round trip that already includes a `URL` parse, the Host/Origin gate
+    and a JSON parse — microseconds of jitter — so each byte costs a large sampling campaign against a token that
+    dies with the process.
+  - The handoff side offers even less: `handoffs` holds **exactly one entry** for the life of the process, so
+    `Map.get` has no sibling entry to be faster or slower than, and a wrong 43-character token almost never
+    collides into the one occupied bucket, so a miss usually never reaches a string comparison at all.
+
+  This is an analytical argument, **not a measurement**. Nobody has timed these operations, and nothing here
+  claims otherwise.
+
+  **Revisit if** either token becomes reachable from off this host, or if the handoff map ever holds enough
+  entries for lookup timing to carry structure.
