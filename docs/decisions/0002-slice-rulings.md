@@ -341,6 +341,20 @@ already used.
 because the tempting tidy-up is to drop `mintHandoff`'s second argument and inherit the 60s default — which
 strands every systemd-started user, and which nothing else in the suite would notice.
 
+**Revisit trigger — missing from this ruling as first written.** The premise above, that the handoff is "never in
+a URL until the user's own `atrium open --print-url` puts it there", is designed to become false.
+`src/index.ts`'s own comment says a browser-launching `atrium open` is a later plan's job, and
+`xdg-open "$(atrium open --print-url)"` defeats the premise **today**: the handoff lands in that command's argv,
+which is `/proc/<pid>/cmdline`, which is precisely the exposure §8.3's ~60s window exists for. When a
+browser-launching `atrium open` lands, that exposure goes live inside atrium itself, and this ruling must be
+re-taken rather than inherited.
+
+The exposed case is narrow and worth naming: **a handoff that is launched and never redeemed.** A redeemed
+handoff is deleted from the map as it is traded, so the window closes on first use however long the TTL says; one
+that is printed into a command line and then never traded stays live for seven days, with its value sitting in a
+world-readable `cmdline` for as long as that process runs. No constant changes here — the trigger is what was
+missing.
+
 ### Accepted residual — one boot handoff means one browser profile per server start
 
 The handoff is single-use and there is exactly one mint site. **Exactly one browser profile can redeem per server
