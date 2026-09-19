@@ -119,6 +119,15 @@ test('serveAsset never maps an unmapped request path onto the filesystem', async
 // from the scheduler's write path) reddens the toEqual below on `root`/`token`.
 test('GET /api/state serves the redacted client value, not the provider Data', async () => {
   const registry = createRegistry()
+  // `satisfies`, not `as`. The plan wrote `as`; an assertion is a conversion,
+  // and the review expected a literal minus `toClient` to compile through it.
+  // Measured on this tree it does not — tsc reports TS2352 ("neither type
+  // sufficiently overlaps", elaborated "Property 'toClient' is missing") —
+  // but a cast is still the one spelling a later edit can silence with
+  // `as unknown as Provider`, and it reads as a conversion, not a check. Under
+  // `satisfies`, deleting `toClient` below fails `bun run typecheck` with
+  // TS2345 at this call and TS1360 at the literal, both elaborated "Property
+  // 'toClient' is missing … but required in type 'Provider<any, any>'".
   registry.register({
     id: 'repos',
     configSchema: { parse: (x: any) => x },
@@ -127,7 +136,7 @@ test('GET /api/state serves the redacted client value, not the provider Data', a
     fetch: async () => ({ root: '/home/someone/src', token: SENTINEL, count: 2 }),
     toClient: (d: any) => ({ count: d.count }),
     actions: [],
-  } as Provider<any, any>)
+  } satisfies Provider<any, any>)
 
   const s = createScheduler(registry, { config: { repos: {} } })
   await s.runNow('repos', 'poll')
