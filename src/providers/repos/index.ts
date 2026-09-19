@@ -177,6 +177,7 @@ type Verdict =
   | { kind: 'valid'; entry: GateResult }
   | { kind: 'dropped'; path: string; reason: DropReason }
   | { kind: 'skip' } // a probe root that is not inside any repository (see ScanState.probes)
+  | { kind: 'probe-error' } // a probe root the gate could not measure: counted, never named
 
 function isCodeZero(code: number | string): boolean {
   // `code` can be the STRING 'ENOENT' when the child never started; narrow
@@ -194,7 +195,13 @@ function isCodeZero(code: number | string): boolean {
  */
 async function gate(candidate: string, timeoutMs: number, probe: boolean): Promise<Verdict> {
   const r = await runGit(candidate, ['rev-parse', '--absolute-git-dir'], { timeoutMs })
-  if (r.timedOut) return { kind: 'dropped', path: candidate, reason: 'timed-out' }
+  // A `dropped` row carries basename(path), and for the home root that is the
+  // operator's username — so the ONE reportable fact about an unmeasurable
+  // PROBE ROOT is that it happened. There is no root-specific drop reason and
+  // adding one is out of this slice; a timeout and a thrown call are therefore
+  // both counted on the closed set and the root is skipped, matching what the
+  // non-zero-exit line below already does silently.
+  if (r.timedOut) return probe ? { kind: 'probe-error' } : { kind: 'dropped', path: candidate, reason: 'timed-out' }
   if (!isCodeZero(r.code)) return probe ? { kind: 'skip' } : { kind: 'dropped', path: candidate, reason: 'invalid' }
 
   const raw = r.stdout.trim()
@@ -330,6 +337,7 @@ async function discover(cfg: ReposConfig, deps: Required<ReposProviderDeps>, sig
     try {
       return await gate(c, deps.classifyTimeoutMs, !scan.candidates.has(c))
     } catch {
+      if (!scan.candidates.has(c)) return { kind: 'probe-error' }
       errors.push('candidate-error')
       return { kind: 'dropped', path: c, reason: 'invalid' }
     }
@@ -338,6 +346,7 @@ async function discover(cfg: ReposConfig, deps: Required<ReposProviderDeps>, sig
   const valid: GateResult[] = []
   for (const v of verdicts) {
     if (v === undefined || v.kind === 'skip') continue
+    if (v.kind === 'probe-error') { errors.push('candidate-error'); continue }
     if (v.kind === 'dropped') dropped.push(droppedEntry(v.path, v.reason))
     else valid.push(v.entry)
   }

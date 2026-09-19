@@ -1,6 +1,6 @@
 import { test, expect, afterAll } from 'bun:test'
 import { realpathSync, symlinkSync, mkdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import {
   cleanupFixtures, makeScanRoot, makeRepoIn, writeGitignore, addWorktree, addSubmodule,
   breakGitPointer, makeZeroByteGitFile, makeVendoredChild, startMergeConflict,
@@ -301,6 +301,27 @@ test('a candidate whose classification git call times out is reported as timed-o
     for (const k of kids) expect(k.reason).toBe('timed-out')
     expect(data.dropped.some((d) => d.reason === 'ambiguous')).toBe(false)
     expect(names(data.repos)).toEqual(['parent'])
+  } finally {
+    process.env.PATH = savedPath
+  }
+})
+
+// The second shim test, and the other half of the root-probe rule: a probe
+// root that exits non-zero is already skipped silently, but one whose
+// rev-parse TIMES OUT used to land in `dropped`, whose rows carry
+// basename(path) — for the home root, the operator's username. It belongs on
+// the closed-set error channel instead. The root is EMPTY, so the probe is the
+// only gate call in the pass and nothing else can supply the error code.
+test('a probe root whose rev-parse times out is reported on the closed set, never named in dropped', async () => {
+  const root = makeScanRoot()
+  const savedPath = process.env.PATH
+  try {
+    process.env.PATH = makeSlowGitShim(resolveGit(), 'rev-parse')
+    const data = await discover(root, undefined, { classifyTimeoutMs: 200 })
+    expect(data.dropped).toEqual([])
+    expect(data.errors).toContain('candidate-error')
+    expect(data.repos).toEqual([])
+    expect(JSON.stringify(reposToClient(data))).not.toContain(basename(root))
   } finally {
     process.env.PATH = savedPath
   }
