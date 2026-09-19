@@ -361,7 +361,13 @@ test('no filename ever reaches the wire — only the count does', async () => {
   expect(JSON.stringify(p.toClient(data))).not.toContain(sentinel)
 })
 
-// M12 (`{ ...entry }`), M13.
+// M4 (the bare gate removed: status runs, exits 128, and this repo reads
+// 'git-error' instead of 'bare'). NOT M12/M13, which this header named
+// before: both leave this test GREEN (measured, task-8-report.md) —
+// setUnavailable DELETES the fields rather than assigning undefined, so a
+// `{ ...entry }` wire cannot resurrect them, and a bare repo never held
+// values for M13 to keep. Their pins are test 16 plus discovery's 29 (M12)
+// and test 8 (M13).
 test('an unavailable repo emits no branch, no count and no time on the wire', async () => {
   const root = makeScanRoot()
   makeRepoIn(root, 'mirror.git', { bare: true })
