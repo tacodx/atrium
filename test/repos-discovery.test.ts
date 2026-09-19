@@ -71,6 +71,17 @@ test('a 0-byte .git file is dropped as invalid and never reaches the classifier'
   const data = await discover(root)
   expect(data.repos).toEqual([])
   expect(data.dropped).toEqual([{ id: repoId(real(zero)), path: real(zero), name: 'zero', reason: 'invalid' }])
+  expect(data.errors).toEqual([])
+
+  // M11's instruction: a root holding ONLY a non-repo directory tree yields
+  // nothing at all — no repo, no dropped row, no error. Nothing in it is a
+  // candidate, so the gate is never consulted for it.
+  const plain = makeScanRoot()
+  mkdirSync(join(plain, 'a', 'b', 'c'), { recursive: true })
+  const nothing = await discover(plain)
+  expect(nothing.repos).toEqual([])
+  expect(nothing.dropped).toEqual([])
+  expect(nothing.errors).toEqual([])
 })
 
 test('a dangling gitdir pointer is dropped as invalid', async () => {
