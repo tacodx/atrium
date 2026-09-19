@@ -1,9 +1,11 @@
 import { test, expect } from 'bun:test'
 import { createRegistry } from '../src/core/registry'
+import { createScheduler } from '../src/core/scheduler'
 import { handleRoute, serveAsset } from '../src/server/routes'
 import type { Provider } from '../src/core/contract'
 
 const HEADERS = { 'x-test': '1' }
+const SENTINEL = 'atrium-redaction-sentinel-9f2c41'
 
 const stubProvider = (id: string, actions: Provider<any, any>['actions']): Provider<any, any> => ({
   id,
@@ -109,4 +111,39 @@ test('serveAsset never maps an unmapped request path onto the filesystem', async
   expect(await serveAsset('/etc/passwd', HEADERS)).toBeUndefined()
   expect(await serveAsset('/../../../etc/passwd', HEADERS)).toBeUndefined()
   expect(await serveAsset('/definitely-not-a-real-dist-file-xyz123.js', HEADERS)).toBeUndefined()
+})
+
+// Task 5. The one test that reads `.data` off a real /api/state response: a
+// real registry, a real createScheduler and a real handleRoute, so the claim is
+// about the bytes on the wire, not the in-memory map. M1 (redaction removed
+// from the scheduler's write path) reddens the toEqual below on `root`/`token`.
+test('GET /api/state serves the redacted client value, not the provider Data', async () => {
+  const registry = createRegistry()
+  registry.register({
+    id: 'repos',
+    configSchema: { parse: (x: any) => x },
+    detect: async () => ({ kind: 'nothing-to-detect' }),
+    schedules: [{ name: 'poll', intervalMs: 3_600_000, runOnStart: false }],
+    fetch: async () => ({ root: '/home/someone/src', token: SENTINEL, count: 2 }),
+    toClient: (d: any) => ({ count: d.count }),
+    actions: [],
+  } as Provider<any, any>)
+
+  const s = createScheduler(registry, { config: { repos: {} } })
+  await s.runNow('repos', 'poll')
+
+  const res = await handleRoute(new Request('http://x/api/state'), {
+    registry,
+    snapshot: s.snapshot,
+    configFor: s.configFor,
+    headers: HEADERS,
+  })
+
+  expect(res.status).toBe(200)
+  // res.text(), not res.json(): a structural assertion can miss a sentinel
+  // hiding in a key name or a nested value.
+  const body = await res.text()
+  expect(JSON.parse(body).repos.data).toEqual({ count: 2 })   // positive shape, inside
+                                                              // Task 2's status envelope
+  expect(body).not.toContain(SENTINEL)                        // and the sentinel is gone
 })
