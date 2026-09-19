@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import {
   cleanupFixtures, makeScanRoot, makeRepoIn, makeZeroByteGitFile, startMergeConflict,
   startCherryPickConflict, startBranchRebaseConflict, addUntrackedFiles, makeEnoentGitShim,
-  makeRecordingGitShim, readShimLog,
+  makeRecordingGitShim, readShimLog, detachHead,
 } from './fixtures/gitrepo.ts'
 import { resolveGit, runGit } from '../src/core/rungit.ts'
 import { buildArgv, dispatch } from '../src/core/actions.ts'
@@ -93,6 +93,7 @@ test('a bare repo is unavailable with reason "bare", and status is never run on 
 test('a mid-rebase repo recovers its real branch and never renders as detached', async () => {
   const root = makeScanRoot()
   startBranchRebaseConflict(makeRepoIn(root, 'rb'), 'feature', 'merge')
+  detachHead(makeRepoIn(root, 'det'))
   const { data } = await readRoot(root)
   const r = byName(data, 'rb')
   expect(r.metaStatus).toBe('ok')
@@ -100,6 +101,12 @@ test('a mid-rebase repo recovers its real branch and never renders as detached',
   expect(r.branch).toBe('feature')
   expect(r.branch).not.toBe('(detached)')
   expect(r.rebaseProgress).toEqual({ current: 1, total: 1 })
+  // The genuinely detached repo, for contrast: state 'detached', and the
+  // literal '(detached)' is never assigned to branch — it is ABSENT.
+  const d = byName(data, 'det')
+  expect(d.repoState).toBe('detached')
+  expect(d.branch).toBeUndefined()
+  expect(d.rebaseProgress).toBeUndefined()
 })
 
 // M8 again, on the apply backend.

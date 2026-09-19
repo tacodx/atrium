@@ -332,3 +332,8 @@ export function readShimLog(logFile: string): string[][] {
   if (!existsSync(logFile)) return []
   return readFileSync(logFile, 'utf8').split('\n').filter((l) => l !== '').map((l) => l.split(' '))
 }
+
+/** `git checkout --detach`: status reports `# branch.head (detached)` with no operation in progress. */
+export function detachHead(repo: string): void {
+  git(repo, 'checkout', '-q', '--detach')
+}
