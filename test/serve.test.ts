@@ -405,6 +405,14 @@ test('the same handoff is refused on a second redemption', async () => {
   }
 })
 
+// Every header EXCEPT `date`: two responses milliseconds apart can straddle a
+// second boundary there, and it says nothing about which path answered.
+function nonDateHeaders(res: Response): Record<string, string> {
+  const out: Record<string, string> = {}
+  res.headers.forEach((v, k) => { if (k !== 'date') out[k] = v })
+  return out
+}
+
 test('a malformed body and an unknown handoff get the same 401, byte for byte', async () => {
   const scratch = runtimeScratch()
   let s: Awaited<ReturnType<typeof startServer>> | undefined
@@ -436,8 +444,36 @@ test('a malformed body and an unknown handoff get the same 401, byte for byte', 
     //                               : 'unauthorized: malformed'
     // The status stays 401 either way, so the BODY comparison is the assertion
     // that does the work here.
-    expect(await malformed.text()).toBe(await unknown.text())
+    const malformedText = await malformed.text()
+    expect(malformedText).toBe(await unknown.text())
     expect(malformed.status).toBe(unknown.status)
+
+    // "Byte for byte" was status and body only; a header is an oracle exactly
+    // as much as a body is. toEqual on the two records pins the set of names
+    // AND every value. Measured: a per-path `x-atrium-reason` header left the
+    // suite at 184/0. MUTATION: add
+    //   'x-atrium-reason': typeof handoff === 'string' ? 'unknown' : 'malformed'
+    // to the /api/session 401's headers. The length guard is not a mutation
+    // target: a helper that iterated nothing would make both toEqual lines
+    // below vacuous, and it measured 6 names on bun 1.3.11.
+    const malformedHeaders = nonDateHeaders(malformed)
+    expect(Object.keys(malformedHeaders).length).toBeGreaterThan(0)
+    expect(nonDateHeaders(unknown)).toEqual(malformedHeaders)
+
+    // THIRD path, consumed LAST so the two probes above ran against an
+    // untouched map: redeem the real handoff, then redeem it again. The route
+    // lists already-redeemed among its "ONE answer" cases and nothing compared
+    // that answer to the others — `the same handoff is refused on a second
+    // redemption` checks 401 and the absence of 'token', which a distinct
+    // body satisfies. Measured: 184/0 with one. MUTATION: a `redeemed` Set in
+    // startServer that answers a second redemption with
+    // 'unauthorized: already redeemed' — the body line reddens first.
+    const handoff = readHandoffFile(scratch).token
+    expect((await redeem(7412, handoff)).status).toBe(200)
+    const again = await redeem(7412, handoff)
+    expect(again.status).toBe(401)
+    expect(await again.text()).toBe(malformedText)
+    expect(nonDateHeaders(again)).toEqual(malformedHeaders)
   } finally {
     s?.stop()
     rmSync(scratch, { recursive: true, force: true })
