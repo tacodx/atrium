@@ -122,6 +122,13 @@ test('an empty repo with no commits surfaces as a normal repo', async () => {
   expect(data.errors).toEqual([])
 })
 
+// The walker's symlink rule is one guard doing two jobs (cycle guard and
+// $HOME-escape guard), and `repos` alone does not pin it: the MUTATION these
+// two tests exist to redden is walkDir's `!entry.isDirectory()` entry filter
+// replaced by a statSync-based directory check, which FOLLOWS symlinks. Under
+// it the link is walked and becomes a candidate of its own; the gate's
+// containment comparison then drops it, so `repos` is unchanged and `dropped`
+// is the only channel that moves. Hence the empty-`dropped` assertion here.
 test('a symlink to a repo inside the root does not produce a second entry', async () => {
   const root = makeScanRoot()
   const proj = makeRepoIn(root, 'proj')
@@ -129,6 +136,27 @@ test('a symlink to a repo inside the root does not produce a second entry', asyn
   const data = await discover(root)
   expect(data.repos).toHaveLength(1)
   expect(data.repos[0]!.path).toBe(real(proj))
+  expect(data.dropped).toEqual([])
+})
+
+// The escape case the rule actually exists for, and the one the test above
+// cannot show: the link's target is OUTSIDE the scanned root entirely — its
+// own tracked temp root here, standing in for anything the operator never
+// named. Under the same statSync mutation the walker leaves the root, and a
+// repository nobody asked about is gated and reported. Nothing at all may
+// reach Data from out there: no repo, no dropped row, no error, and not the
+// outside path in any field of either shape.
+test('a symlink pointing out of the scanned root never reaches Data', async () => {
+  const root = makeScanRoot()
+  const outsideRoot = makeScanRoot()
+  const outside = makeRepoIn(outsideRoot, 'secret')
+  symlinkSync(outside, join(root, 'escape'))
+  const data = await discover(root)
+  expect(data.repos).toEqual([])
+  expect(data.dropped).toEqual([])
+  expect(data.errors).toEqual([])
+  expect(JSON.stringify(data)).not.toContain(real(outside))
+  expect(JSON.stringify(reposToClient(data))).not.toContain(real(outside))
 })
 
 test('a repo reachable through both the home root and an extra root appears once', async () => {
