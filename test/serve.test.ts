@@ -516,9 +516,14 @@ test('atrium open --print-url prints the boot handoff from the file and does not
     [process.execPath, 'run', 'src/index.ts', 'serve', '--port', '7411'],
     { env, stderr: 'pipe', stdout: 'pipe' },
   )
+  // Hoisted out of the try so the finally can see it. The `before.length`
+  // guard below exists because of exactly that hoist: a variable that is never
+  // assigned makes `not.toContain` vacuously true, which is the shape this
+  // project has been bitten by repeatedly.
+  let before = ''
   try {
     expect(await waitForFile(hp)).toBe(true)
-    const before = readHandoffFile(scratch).token
+    before = readHandoffFile(scratch).token
 
     const open = Bun.spawn(
       [process.execPath, 'run', 'src/index.ts', 'open', '--print-url'],
@@ -538,6 +543,17 @@ test('atrium open --print-url prints the boot handoff from the file and does not
     proc.kill()
     await proc.exited   // never leave a server squatting machine-global 7411
     rmSync(scratch, { recursive: true, force: true })
+
+    // The server process is the ONE place a live handoff exists in memory, and
+    // under systemd its stderr IS the persistent journal. Nothing pinned that
+    // it stays out of either stream — measured, a log of the mint left the
+    // whole suite at 183/0. MUTATION: add
+    // console.log(`atrium: boot handoff ${bootHandoff}`) after the mint in
+    // startServer. The console.error spelling reddens this too, and that is
+    // the one systemd copies into a permanent journal line.
+    const logs = (await new Response(proc.stdout).text()) + (await new Response(proc.stderr).text())
+    expect(before.length).toBeGreaterThan(0)   // the assertion below is vacuous against ''
+    expect(logs).not.toContain(before)
   }
 })
 
