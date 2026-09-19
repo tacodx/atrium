@@ -5,6 +5,7 @@ import { basename, join, relative, sep } from 'node:path'
 import { runGit } from '../../core/rungit.ts'
 import type { FetchCtx, Provider } from '../../core/contract.ts'
 import { reposConfigSchema, type ReposConfig } from './config.ts'
+import { createReposActions } from './actions.ts'
 
 // Re-exported under the plan's names; declared in config.ts because the
 // defaults live there and config.ts cannot import this module (cycle).
@@ -807,7 +808,11 @@ export function createReposProvider(deps: ReposProviderDeps = {}): Provider<Repo
     ],
     fetch,
     toClient: reposToClient,
-    actions: [], // Task 8 fills this.
+    // Getters, not values: a snapshot captured here would validate against
+    // an empty table (and an undefined config) forever. Only the surfaced
+    // table is passed — `dropped` is a separate collection resolveTarget
+    // never sees.
+    actions: createReposActions({ repos: () => table, config: () => lastCfg }),
   }
   return provider
 }

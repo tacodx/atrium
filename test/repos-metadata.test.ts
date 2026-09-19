@@ -7,8 +7,11 @@ import {
   makeRecordingGitShim, readShimLog,
 } from './fixtures/gitrepo.ts'
 import { resolveGit, runGit } from '../src/core/rungit.ts'
+import { buildArgv, dispatch } from '../src/core/actions.ts'
+import { createRegistry } from '../src/core/registry.ts'
 import { reposConfigSchema, type ReposConfig } from '../src/providers/repos/config.ts'
 import { createReposProvider, reposToClient, type ReposData, type RepoEntry } from '../src/providers/repos/index.ts'
+import { resolveTarget } from '../src/providers/repos/actions.ts'
 
 // Every test builds its own makeScanRoot() and passes it as deps.homeDir; none
 // reads $HOME (§10 rule 1). Every fixture git call runs under CLEAN_ENV (§10
@@ -346,6 +349,96 @@ test('metaCheckedAt never reaches the wire', async () => {
   expect(w.branch).toBe('main')
   expect(w.uncommittedCount).toBe(0)
   expect(typeof w.lastCommitAt).toBe('number')
+})
+
+// --- Actions and target validation ------------------------------------------------------------
+
+/** A registry holding one repos provider over `root`, after discovery + metadata. */
+async function actionRig(root: string, cfg: ReposConfig = defaults()) {
+  const { p, data } = await readRoot(root, cfg)
+  const registry = createRegistry()
+  registry.register(p)
+  return { p, cfg, data, registry }
+}
+
+function action(p: ReturnType<typeof createReposProvider>, id: string) {
+  const a = p.actions.find((x) => x.id === id)
+  if (a === undefined) throw new Error(`no action ${id}`)
+  return a
+}
+
+// M15 (table/config captured by value at construction).
+test("each action's argv places its own -- or option flag before the repo path", async () => {
+  const root = makeScanRoot()
+  makeRepoIn(root, 'proj')
+  const { p, data } = await actionRig(root)
+  const path = byName(data, 'proj').path
+  expect(p.actions.map((a) => a.id)).toEqual(['open-editor', 'open-terminal', 'open-claude'])
+  expect(p.actions.map((a) => a.kind)).toEqual(['exec', 'exec', 'exec'])
+  // Through buildArgv, so the exec-arm guard is in the path.
+  expect(buildArgv(action(p, 'open-editor'), { path })).toEqual({ cmd: 'code', args: ['--', path] })
+  expect(buildArgv(action(p, 'open-terminal'), { path })).toEqual({ cmd: 'konsole', args: ['--separate', '--workdir', path] })
+  expect(buildArgv(action(p, 'open-claude'), { path })).toEqual({ cmd: 'konsole', args: ['--separate', '--workdir', path, '-e', 'claude'] })
+})
+
+// M2 (resolveTarget call removed), M3 (prefix match), M15.
+test('an undiscovered path is refused before any argv is built', async () => {
+  const root = makeScanRoot()
+  makeRepoIn(root, 'proj')
+  const { cfg, data, registry } = await actionRig(root)
+  const path = byName(data, 'proj').path
+  const refuse = (target: unknown) =>
+    expect(dispatch(registry, 'repos', 'open-editor', target, { cfg })).rejects.toThrow(/unknown repository target/)
+  await refuse({ path: '/tmp/not-a-discovered-repo' })
+  await refuse({ path: join(path, 'sub') })          // a subdirectory of a discovered repo
+  await refuse({ path: path + '/' })                 // trailing slash
+  await refuse({ path: join(path, '..') })           // <discovered>/.. — note join() normalises; the raw form too:
+  await refuse({ path: path + '/..' })
+})
+
+// M2.
+test('a dropped-ambiguous candidate is not an action target', async () => {
+  const root = makeScanRoot()
+  const umb = makeRepoIn(root, 'umb')                 // no .gitignore, so its child is ambiguous
+  makeRepoIn(umb, 'child')
+  const { cfg, data, registry } = await actionRig(root)
+  const droppedChild = data.dropped.find((d) => d.name === 'child')
+  expect(droppedChild).toBeDefined()
+  expect(droppedChild!.reason).toBe('ambiguous')
+  expect(data.repos.map((r) => r.name)).toEqual(['umb'])
+  // The dropped candidate's real path, byte-identical to what discovery saw.
+  const table = new Map(data.repos.map((r) => [r.path, r]))
+  expect(() => resolveTarget(table, { path: droppedChild!.path })).toThrow(/unknown repository target/)
+  await expect(dispatch(registry, 'repos', 'open-terminal', { path: droppedChild!.path }, { cfg })).rejects.toThrow(/unknown repository target/)
+})
+
+// M2.
+test('a malformed target is refused', async () => {
+  const root = makeScanRoot()
+  makeRepoIn(root, 'proj')
+  const { cfg, registry } = await actionRig(root)
+  for (const target of [{}, null, 'string', { path: 42 }, { path: ['/tmp/x'] }]) {
+    await expect(dispatch(registry, 'repos', 'open-editor', target, { cfg })).rejects.toThrow(/action target must be an object with a string "path"/)
+  }
+})
+
+test('an action dispatched before any fetch fails closed', async () => {
+  const root = makeScanRoot()
+  makeRepoIn(root, 'proj')
+  const p = createReposProvider({ homeDir: root })   // no fetch
+  const registry = createRegistry()
+  registry.register(p)
+  await expect(dispatch(registry, 'repos', 'open-editor', { path: join(root, 'proj') }, { cfg: defaults() })).rejects.toThrow(/configuration has not been loaded yet/)
+})
+
+// The literal is legal in test/; the tripwire scans only src/.
+test('a configured cmd naming the version-control binary is still refused', async () => {
+  const root = makeScanRoot()
+  makeRepoIn(root, 'proj')
+  const cfg = reposConfigSchema.parse({ editor: { cmd: 'git', args: ['--', '${path}'] } })
+  const { data, registry } = await actionRig(root, cfg)
+  const path = byName(data, 'proj').path
+  await expect(dispatch(registry, 'repos', 'open-editor', { path }, { cfg })).rejects.toThrow(/runGit/)
 })
 
 // --- Config: templates and ranges ----------------------------------------------------------
