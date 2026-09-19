@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync, mkdirSync, chmodSync, existsSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, mkdirSync, chmodSync, existsSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
@@ -10,8 +10,22 @@ const CLEAN_ENV = {
   GIT_CONFIG_SYSTEM: '/dev/null',
 }
 
+/**
+ * Every temp directory a builder creates is registered here, and
+ * `cleanupFixtures()` DRAINS the list (`splice(0)`), so a later file's call
+ * cannot delete a directory created after it. Tests create fixtures inside
+ * `beforeAll`/test bodies, never at module top level, so the drain stays
+ * ordered. Carry-forward P3's `afterAll` cleanup.
+ */
+const created: string[] = []
+function track(dir: string): string { created.push(dir); return dir }
+
+export function cleanupFixtures(): void {
+  for (const d of created.splice(0)) rmSync(d, { recursive: true, force: true })
+}
+
 export function makeRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'atrium-fix-'))
+  const dir = track(mkdtempSync(join(tmpdir(), 'atrium-fix-')))
   execFileSync('git', ['init', '-q', '-b', 'main', dir], { env: CLEAN_ENV })
   writeFileSync(join(dir, 'README.md'), '# fixture\n')
   execFileSync('git', ['-C', dir, 'add', '.'], { env: CLEAN_ENV })
@@ -102,3 +116,148 @@ export function makeMaliciousRepo(): { dir: string; marker: string } {
 }
 
 export const wasPwned = (marker: string) => existsSync(marker)
+
+// --- Discovery fixture builders (Task 7; Task 8 reuses the conflict builders) ---
+
+const IDENTITY = ['-c', 'user.email=t@t', '-c', 'user.name=t']
+
+function git(dir: string, ...args: string[]): string {
+  return execFileSync('git', ['-C', dir, ...IDENTITY, ...args], { env: CLEAN_ENV, stdio: ['ignore', 'pipe', 'pipe'] }).toString()
+}
+
+/** A tracked, empty temp directory — every discovery test's `homeDir`. */
+export function makeScanRoot(): string {
+  return track(mkdtempSync(join(tmpdir(), 'atrium-scan-')))
+}
+
+/**
+ * `git init -q -b <branch ?? 'main'>` (with `--bare` when `opts.bare`) at
+ * `<root>/<rel>`, then unless `opts.empty` one committed `x.txt`. Not tracked
+ * separately: it lives under an already-tracked root.
+ */
+export function makeRepoIn(root: string, rel: string, opts: { bare?: boolean; empty?: boolean; branch?: string } = {}): string {
+  const dir = join(root, rel)
+  mkdirSync(dir, { recursive: true })
+  const initArgs = ['init', '-q', '-b', opts.branch ?? 'main']
+  if (opts.bare) initArgs.push('--bare')
+  execFileSync('git', [...initArgs, dir], { env: CLEAN_ENV })
+  if (!opts.bare && !opts.empty) {
+    writeFileSync(join(dir, 'x.txt'), 'x\n')
+    git(dir, 'add', '.')
+    git(dir, 'commit', '-qm', 'init')
+  }
+  return dir
+}
+
+export function commitAll(repo: string, message: string): void {
+  git(repo, 'add', '-A')
+  git(repo, 'commit', '-qm', message)
+}
+
+export function writeGitignore(repo: string, lines: string[]): void {
+  writeFileSync(join(repo, '.gitignore'), lines.map((l) => l + '\n').join(''))
+  commitAll(repo, 'gitignore')
+}
+
+/** Works even when `rel` is inside a path the repo's own .gitignore covers. */
+export function addWorktree(repo: string, rel: string, opts: { detach?: boolean; branch?: string } = {}): string {
+  if (opts.detach) git(repo, 'worktree', 'add', '-q', '--detach', rel, 'HEAD')
+  else git(repo, 'worktree', 'add', '-q', rel, '-b', opts.branch ?? 'wt')
+  return join(repo, rel)
+}
+
+export function addSubmodule(parent: string, child: string, rel: string): string {
+  git(parent, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', child, rel)
+  commitAll(parent, 'sub')
+  return join(parent, rel)
+}
+
+/** The dangling-pointer shape: rev-parse exits 128 ("not a git repository: (null)"). */
+export function breakGitPointer(dir: string): void {
+  rmSync(join(dir, '.git'), { recursive: true, force: true })
+  writeFileSync(join(dir, '.git'), 'gitdir: ../.git/modules/gone\n')
+}
+
+/** rev-parse exits 128 ("invalid gitfile format"). */
+export function makeZeroByteGitFile(root: string, rel: string): string {
+  const dir = join(root, rel)
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, '.git'), '')
+  return dir
+}
+
+/**
+ * `<parent>/<rel>/v.txt` committed in the PARENT (so it is tracked), then a
+ * repo initialised inside `<parent>/<rel>`. `ls-files -- <rel>` in the parent
+ * returns `<rel>/v.txt`; `ls-files -s -- <rel>` shows mode 100644, not 160000.
+ */
+export function makeVendoredChild(parent: string, rel: string): string {
+  const dir = join(parent, rel)
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'v.txt'), 'v\n')
+  commitAll(parent, 'vendor')
+  execFileSync('git', ['init', '-q', '-b', 'main', dir], { env: CLEAN_ENV })
+  git(dir, 'add', '.')
+  git(dir, 'commit', '-qm', 'vendored')
+  return dir
+}
+
+function conflictBase(repo: string): void {
+  writeFileSync(join(repo, 'f.txt'), 'line1\n')
+  commitAll(repo, 'base')
+  git(repo, 'checkout', '-q', '-b', 'side')
+  writeFileSync(join(repo, 'f.txt'), 'side\n')
+  commitAll(repo, 'side')
+  git(repo, 'checkout', '-q', 'main')
+  writeFileSync(join(repo, 'f.txt'), 'main\n')
+  commitAll(repo, 'main')
+}
+
+/** The three conflicting operations all exit 1; the shape they leave is the point. */
+function conflictOp(repo: string, args: string[]): void {
+  try {
+    git(repo, ...args)
+  } catch (e) {
+    const status = (e as { status?: unknown }).status
+    if (status !== 1) throw e
+    return
+  }
+  throw new Error(`fixture: expected ${args[0]} to conflict`)
+}
+
+/** Leaves .git/MERGE_HEAD. */
+export function startMergeConflict(repo: string): void {
+  conflictBase(repo)
+  conflictOp(repo, ['merge', 'side'])
+}
+
+/** Leaves .git/CHERRY_PICK_HEAD. */
+export function startCherryPickConflict(repo: string): void {
+  conflictBase(repo)
+  conflictOp(repo, ['cherry-pick', 'side'])
+}
+
+/** Leaves .git/rebase-merge/ (head-name refs/heads/main, msgnum 1, end 1). */
+export function startRebaseConflict(repo: string): void {
+  conflictBase(repo)
+  conflictOp(repo, ['rebase', 'side'])
+}
+
+/**
+ * A tracked directory holding an executable named `git` that sleeps 3 s on
+ * ONE subcommand and execs the real binary for everything else. Both
+ * absolutes are load-bearing: gitEnvFor builds the child's PATH as
+ * dirname(gitBin) — this directory, which contains only the shim — so a bare
+ * `sleep` would exit 127 in ~12 ms and the run would never time out. `exec`
+ * makes /bin/sh replace itself with the sleeper so execFile's SIGTERM reaches
+ * it directly and leaves no orphan. Returns the directory to put on
+ * process.env.PATH (resolveGit reads PATH on every call).
+ */
+export function makeSlowGitShim(realGit: string, slowSubcommand: string, sleepBin = Bun.which('sleep')): string {
+  if (!sleepBin) throw new Error('makeSlowGitShim: sleep not found on PATH')
+  const dir = track(mkdtempSync(join(tmpdir(), 'atrium-shim-')))
+  const shim = join(dir, 'git')
+  writeFileSync(shim, `#!/bin/sh\ncase " $* " in *" ${slowSubcommand} "*) exec ${sleepBin} 3 ;; esac\nexec ${realGit} "$@"\n`)
+  chmodSync(shim, 0o755)
+  return dir
+}
