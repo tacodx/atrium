@@ -2452,6 +2452,85 @@ Test *counts* will differ once Tasks 2–4 have added their own tests; the *name
 
 ---
 
+#### Task 5 addendum — mutation rows measured on the post-T4 tree
+
+> Recorded HERE, in the tracked plan, for the same reason Task 3's and Task 4's were: **Task 10
+> re-runs this whole mutation table**, `.superpowers/sdd/` is gitignored, and a row that cannot
+> redden its named test would read as a regression when Task 10 runs it. The table above was
+> written against the Plan 1 tree at `3a0491e` and had never been run on a tree with Tasks 2–4
+> applied. Every row below was run on `f68a5d1` plus this task's commits, the plan's literal text
+> first, on the FULL suite (`bun test`), by exact-string replacement that refuses to apply unless
+> the target occurs exactly once, then reverted with `git checkout` and re-run green. Baseline
+> 184 pass / 0 fail / 449 expect() across 13 files; exit 187 / 0 / 465. Before any code was
+> written, every row's literal target string was absent from the tree (the seam did not exist),
+> so the pre-code audit is: "all six rows are inapplicable until the seam lands; `snapshot()[providerId]`
+> is absent and stays absent".
+
+| # | The plan says | Measured | The realisable row |
+|---|---|---|---|
+| M1 | delete `const wire = p.toClient(data)`, write `last.set(providerId, data)`; **three** named tests red | **184 pass / 3 fail / 453** — exactly the three named. `the client value is the redacted one …` on the first `toEqual` (`.data` carries `+ root`, `+ token`); `a provider with no toClient …` on `Expected promise that rejects / Received promise that resolved`; `GET /api/state serves the redacted client value …` on the body's `.repos.data` (`+ root`, `+ token`). Mutant typechecks (exit 0) | as written |
+| M2 | hoist `const wire` above `previousByKey.set`, write `previousByKey.set(key, wire)`; two named tests red | **185 / 2 / 464** — exactly `passes the previous result …` (`- "n": 1 / + "wire": true`) and `previous is scoped per schedule …` (`repos: ["a","b"]` replaced by `wire: true`). Mutant typechecks | as written |
+| M3 | `toClient?(data: Data): unknown` and `const wire = p.toClient ? p.toClient(data) : data`; one named test red | **186 / 1 / 460** — exactly `a provider with no toClient fails the run …` (`Expected promise that rejects`). **`bun run typecheck` exit 0 under the mutant**: the compiler cannot see this one, only the runtime test can | as written |
+| M4 | replace "the notification argument `snapshot()[providerId]`" with `{ data: p.toClient(data), schedules: {} }` | **cannot apply — 0 occurrences.** Task 2 factored the listener loop into `notify(providerId)` → `buildStatus(providerId)` → `last.get(providerId)`; the plan's sketch line `for (const l of listeners) l(providerId, snapshot()[providerId])` never existed on this tree | Two forms, BOTH measured. **M4-coarse** (the success-arm `notify(providerId)` → `for (const l of listeners) l(providerId, { data: p.toClient(data), schedules: {} })`): **185 / 2 / 462** — the identity line (`Received: serializes to the same string`) AND collateral `onUpdate carries the status envelope …` in test/scheduler-lifecycle.test.ts, a `TypeError: undefined is not an object (evaluating 'seen[1][1].schedules.poll.consecutiveFailures')` from the empty `schedules`. **M4-sharp** (preferred; the row Task 10 should run): `for (const l of listeners) l(providerId, { ...buildStatus(providerId)!, data: p.toClient(data) })` — **186 / 1 / 464**, ONLY the identity line, the mutation that says "computed twice" and nothing else. `notify(providerId)` occurs twice in scheduler.ts; mutate the success-arm occurrence only — in the catch arm `data` is out of scope and the mutant does not compile. Both mutants typecheck |
+| M5 | identity stub default + M2 → zero failures | **187 / 0 / 465** — confirmed: the ENTIRE suite green, including both tests M2 reddens. Both changes reverted | demonstration, as written. It is the proof the `stub` default must transform |
+| M6 | delete `test/actions.test.ts`'s `toClient` → `(9,83) TS2741` | exactly `test/actions.test.ts(9,83): error TS2741: Property 'toClient' is missing in type '{ … }' but required in type 'Provider<any, any>'`, exit 2; restored → exit 0 | as written. The error code depends on the factory's shape: the two `...overrides: Partial<Provider>` factories (contract.test.ts, config.test.ts) surface as **TS2322** (`((data: any) => unknown) | undefined` is not assignable), not TS2741 — see the checkpoint below. Task 10 must not grep for TS2741 alone |
+
+**Every runtime mutant (M1, M2, M3, M4-coarse, M4-sharp, M5) typechecks with exit 0.** The compile-time
+guarantee this task ships is exactly M6's — a `Provider`-typed literal without the member does not
+compile — and nothing more; the other five properties are held by tests alone.
+
+**The contract-edit-alone checkpoint (A2).** With the member added to `src/core/contract.ts` and nothing
+else touched, `bun run typecheck` gives EXACTLY four errors: `test/actions.test.ts(9,83)` and
+`test/routes.test.ts(8,99)` as TS2741 (property missing), `test/contract.test.ts(6,96)` and
+`test/config.test.ts(47,100)` as TS2322 (through their `...overrides` spread). That is the moment "the
+stub factories breaking is the point" is observable; after the four members it iterates zero times.
+`test/fixtures/provider.ts` typechecked UNCHANGED — it already declared `toClient` on
+`FixtureProviderOptions` (:40) and on the object (:107) with `defaultToClient = (data) => ({ ok: data?.ok })`
+at :76, an explicit one-field allowlist. The table row "will not typecheck without it" was stale, and the
+step "if Task 2's default is identity, fix it here" did not fire.
+
+**The ripple the plan section does not know about (F3).** `test/scheduler-lifecycle.test.ts` is Task 2's
+and post-dates this section. With the contract member, the scheduler edit and the four factory members
+applied and that file UNTOUCHED, the full suite is **182 pass / 2 fail / 447**, and the red set is exactly
+`consecutive failures accumulate and a success clears the record` (:206,
+`expect(s.snapshot().fx?.data).toEqual(payload)`) and `onUpdate carries the status envelope, and the record
+is current when it fires` (:234, `expect(seen[1]![1].data).toEqual(payload)`), both `- "v": 42 /
++ "ok": undefined` through the fixture's `{ ok }` allowlist. Nothing else moved; the fixture-seam test's
+`{ ok: false }` at :334 survives. Ruled fix: each of the two `makeFixtureProvider` calls names its one field,
+`toClient: (d) => ({ v: d.v })` — `Data` is inferred from `fetch`'s return so `d` needs no annotation — and
+**the two assertions are byte-identical**. Then 184 / 0 / 449 again. So "no existing assertion changed" holds
+on this tree, but the sentence "the only edits to pre-existing test code in this task are the three factory
+`toClient` members, the two new `SENTINEL` constants, and one import" does not: add the two fixture options
+in scheduler-lifecycle.test.ts, and read "three" as four (below).
+
+**Three declaration comments, not two.** Besides `last` and `previousByKey` (scheduler.ts :24–25), the
+exported `ProviderStatus.data` comment (:19, "the provider's most recent Data") went false with this edit —
+`data` is now the `toClient()` output — and Task 6 documents its structural copy of that type as exactly
+that. It now reads "the provider's toClient() output (the client value); absent until the first success".
+
+**Prose in this section corrected here rather than rewritten in place:**
+
+- "three factory `toClient` members" (~2249) and "the three Plan 1 stub factories" / "the three factory
+  `toClient`s" (~2384–2388): **four**. `test/config.test.ts:47` is the fourth `Provider`-typed factory,
+  created by Task 3, whose own block comment already said to read the sentence as four. Its member is the
+  same constant as routes/actions — over a default `Data` of `{}` the field-by-field allowlist names zero
+  fields, so a constant IS that allowlist, and its comment now says so.
+- "**test 10 of `test/ws-protocol.test.ts`**" (~2359): Task 6 numbers the sentinel-frame test **18**.
+- "Four corrections are folded in here" (~2296): seven items are listed.
+- the fixture's `toClient` "positioned above the overrides spread" (~2233): the fixture has no spread;
+  `toClient` is at :107 and `setWire` at :126.
+- "the same computed value feeds both the `/api/state` snapshot and the WebSocket push" (~2307, spec text):
+  forward-looking — no push exists until Task 6. On this tree the one holder is `last`, read by
+  `buildStatus()` for both `snapshot()` and `notify()`; the "one place" property is what Task 6's publish
+  inherits.
+- The M1 row's parenthetical "the listener payload is built from `snapshot()`" is `buildStatus()` on this
+  tree; the property it states (one write un-redacts both wires) is what was measured.
+
+**Counts.** 184 → 187 tests (+3), 449 → 465 expect() (+16: 7 in the sentinel test, 6 in the missing-toClient
+test, 3 in the routes test). Full suite run twice at exit, identical.
+
+---
+
 **Out of scope for this task:**
 
 - **Do not build an audit log.** Step "spec reconciliation, part 3" deletes the claim; it does not
