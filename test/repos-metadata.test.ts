@@ -374,6 +374,21 @@ function action(p: ReturnType<typeof createReposProvider>, id: string) {
   return a
 }
 
+/**
+ * An inert stand-in for DispatchOptions.launcher (actions.ts:64), passed by
+ * EVERY dispatch below. Each of those dispatches is expected to reject long
+ * before spawnDetached is reached — but the whole point of these tests is to
+ * be re-run under mutants, and M2/M3 delete exactly the check that makes them
+ * reject. Under the DEFAULT launcher ('systemd-run') a mutation run would
+ * then open a real editor or terminal on the operator's desktop, silently,
+ * once per case. /bin/false STARTS and exits 1, so spawnDetached's fallback —
+ * which keys on the `error` event, i.e. on failing to start, never on the
+ * exit status (actions.ts:104-108) — does not fire, and nothing is launched.
+ * An absent path would be WORSE than the default: failing to start is exactly
+ * what triggers the bare, unscoped relaunch of the command itself.
+ */
+const INERT_LAUNCHER = '/bin/false'
+
 // M15 (table/config captured by value at construction).
 test("each action's argv places its own -- or option flag before the repo path", async () => {
   const root = makeScanRoot()
@@ -395,7 +410,7 @@ test('an undiscovered path is refused before any argv is built', async () => {
   const { cfg, data, registry } = await actionRig(root)
   const path = byName(data, 'proj').path
   const refuse = (target: unknown) =>
-    expect(dispatch(registry, 'repos', 'open-editor', target, { cfg })).rejects.toThrow(/unknown repository target/)
+    expect(dispatch(registry, 'repos', 'open-editor', target, { cfg, launcher: INERT_LAUNCHER })).rejects.toThrow(/unknown repository target/)
   await refuse({ path: '/tmp/not-a-discovered-repo' })
   await refuse({ path: join(path, 'sub') })          // a subdirectory of a discovered repo
   await refuse({ path: path + '/' })                 // trailing slash
@@ -416,7 +431,7 @@ test('a dropped-ambiguous candidate is not an action target', async () => {
   // The dropped candidate's real path, byte-identical to what discovery saw.
   const table = new Map(data.repos.map((r) => [r.path, r]))
   expect(() => resolveTarget(table, { path: droppedChild!.path })).toThrow(/unknown repository target/)
-  await expect(dispatch(registry, 'repos', 'open-terminal', { path: droppedChild!.path }, { cfg })).rejects.toThrow(/unknown repository target/)
+  await expect(dispatch(registry, 'repos', 'open-terminal', { path: droppedChild!.path }, { cfg, launcher: INERT_LAUNCHER })).rejects.toThrow(/unknown repository target/)
 })
 
 // M2.
@@ -425,7 +440,7 @@ test('a malformed target is refused', async () => {
   makeRepoIn(root, 'proj')
   const { cfg, registry } = await actionRig(root)
   for (const target of [{}, null, 'string', { path: 42 }, { path: ['/tmp/x'] }]) {
-    await expect(dispatch(registry, 'repos', 'open-editor', target, { cfg })).rejects.toThrow(/action target must be an object with a string "path"/)
+    await expect(dispatch(registry, 'repos', 'open-editor', target, { cfg, launcher: INERT_LAUNCHER })).rejects.toThrow(/action target must be an object with a string "path"/)
   }
 })
 
@@ -435,7 +450,7 @@ test('an action dispatched before any fetch fails closed', async () => {
   const p = createReposProvider({ homeDir: root })   // no fetch
   const registry = createRegistry()
   registry.register(p)
-  await expect(dispatch(registry, 'repos', 'open-editor', { path: join(root, 'proj') }, { cfg: defaults() })).rejects.toThrow(/configuration has not been loaded yet/)
+  await expect(dispatch(registry, 'repos', 'open-editor', { path: join(root, 'proj') }, { cfg: defaults(), launcher: INERT_LAUNCHER })).rejects.toThrow(/configuration has not been loaded yet/)
 })
 
 // The literal is legal in test/; the tripwire scans only src/.
@@ -445,7 +460,7 @@ test('a configured cmd naming the version-control binary is still refused', asyn
   const cfg = reposConfigSchema.parse({ editor: { cmd: 'git', args: ['--', '${path}'] } })
   const { data, registry } = await actionRig(root, cfg)
   const path = byName(data, 'proj').path
-  await expect(dispatch(registry, 'repos', 'open-editor', { path }, { cfg })).rejects.toThrow(/runGit/)
+  await expect(dispatch(registry, 'repos', 'open-editor', { path }, { cfg, launcher: INERT_LAUNCHER })).rejects.toThrow(/runGit/)
 })
 
 // --- Config: templates and ranges ----------------------------------------------------------
