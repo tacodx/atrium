@@ -563,6 +563,7 @@ test('atrium open --print-url prints the boot handoff from the file and does not
   // pre-fix shape with waitForFile pointed at a file that never appears). The
   // finally only kills, waits, captures and removes.
   let before = ''
+  let sessionToken = ''
   let logs = ''
   try {
     expect(await waitForFile(hp)).toBe(true)
@@ -582,6 +583,13 @@ test('atrium open --print-url prints the boot handoff from the file and does not
     // SERVER process, so a second process has nothing to mint into; this pins
     // that the reader did not grow a writer.
     expect(readHandoffFile(scratch).token).toBe(before)
+
+    // Redeem against the CHILD so its session token is known to this process.
+    // consumeHandoff deletes the map entry, not the file — only cleanup does
+    // that — so the file assertion above is unaffected by the order here.
+    const body = await (await redeem(7411, before)).json()
+    expect(typeof body.token).toBe('string')
+    sessionToken = body.token
   } finally {
     proc.kill()
     await proc.exited   // never leave a server squatting machine-global 7411
@@ -595,6 +603,7 @@ test('atrium open --print-url prints the boot handoff from the file and does not
   // string. What this guard does is turn that confusing failure into a plain
   // "the handoff was never read" one.
   expect(before.length).toBeGreaterThan(0)
+  expect(sessionToken.length).toBeGreaterThan(0)
 
   // The server process is the ONE place a live handoff exists in memory, and
   // under systemd its stderr IS the persistent journal. Nothing pinned that
@@ -604,6 +613,12 @@ test('atrium open --print-url prints the boot handoff from the file and does not
   // startServer. The console.error spelling reddens this too, and that is
   // the one systemd copies into a permanent journal line.
   expect(logs).not.toContain(before)
+  // serve.ts's rule names BOTH credentials; the line above pins only the
+  // handoff. Measured: a console.error of the session token after the mint
+  // left the whole suite at 184/0. MUTATION: add
+  // console.error(`atrium: session token ${auth.sessionToken}`) after the
+  // mint in startServer — this line, and only this line, reddens.
+  expect(logs).not.toContain(sessionToken)
 })
 
 // Three mutations, one per assertion group in this test, all run RED then
