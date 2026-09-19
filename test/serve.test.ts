@@ -84,8 +84,13 @@ test('a port collision exits 78, not a restart loop', async () => {
   // loads $XDG_CONFIG_HOME/atrium/config.json (Task 3). Without it this child
   // reads the DEVELOPER'S real config, and one malformed or schema-rejected
   // file there would turn this test red for a reason its name never mentions.
+  // XDG_RUNTIME_DIR is scoped for the same reason the six in-process servers
+  // above are: this child was the one spawn left inheriting the real one. It
+  // is safe only because EADDRINUSE exits 78 before any write, which is a
+  // property of the current ordering in startServer, not a rule. Hygiene, no
+  // mutation: nothing here reads the runtime dir back.
   const proc = Bun.spawn([process.execPath, 'run', 'src/index.ts', 'serve', '--port', '7394'], {
-    env: { ...process.env, XDG_CONFIG_HOME: emptyConfigHome() },
+    env: { ...process.env, XDG_RUNTIME_DIR: SHARED_RD, XDG_CONFIG_HOME: emptyConfigHome() },
     stderr: 'pipe',
   })
   const code = await proc.exited
