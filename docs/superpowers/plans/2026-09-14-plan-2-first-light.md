@@ -5710,3 +5710,95 @@ failure exits exactly 128. A `makeSlowGitShim`-shaped shim that intercepts `rev-
 instead of execing git would make the mutant accept a non-repository, and test 6 would then redden
 on the `dropped` row it expects. That is a new fixture builder, so it is out of this round's
 three-file scope; Task 10 may add it rather than re-measuring M11 as a tests-check.
+
+#### Task 8 addendum — A0's type slice, the template rule order, every mutation row measured, and the failure-record channel
+
+> Recorded HERE, in the tracked plan, for the same reason Tasks 3–7's were: **Task 10 re-runs this
+> whole mutation table**, `.superpowers/sdd/` is gitignored, and a row that cannot redden its named
+> test would read as a regression when Task 10 runs it. Every row below was run on `6221f1e` plus
+> this task's commits, the plan's literal text first, on the FULL suite (`bun test`) plus
+> `bun run typecheck`, by exact-string replacement that refuses to apply unless every target occurs
+> exactly once (and refuses on a dirty tree), then reverted with `git checkout` (diff-stat verified
+> empty) and re-run green. Baseline 238 pass / 0 fail / 661 expect() across 16 files; exit
+> **264 / 0 / 800 across 17 files** (+26 tests, all in `test/repos-metadata.test.ts`). Every mutant
+> typechecks (exit 0).
+
+**Pre-code audit (6221f1e).** The metadata pass and `actions.ts` did not exist, so every M1–M17
+target was absent and no row could redden before the code landed. The measurement is below.
+
+**A0 is not green from the two test edits and the config widening alone.** Test 29's positive half
+asserts `metaStatus` on the wire, and nothing carried that field before step B. A0 (`d3b87e4`)
+therefore also carries the minimal type slice — `metaStatus` on `RepoEntry` (discovery writes
+`'unavailable'`), on `RepoWire`, and in the allowlist — and test 29's `'ok'`-with-branch-and-count
+half is in step B's diff (`60e84d2`). T7's M9 against the amended test 1: **206 / 32**, test 1
+`Received: undefined` plus the whole discovery file. T7's M10 against the amended test 29:
+**237 / 1**, test 29 on `+ "path": ".../zero"` in `dropped`.
+
+**`METADATA_CONCURRENCY_DEFAULT` / `_MAX` / `METADATA_TIMEOUT_MS_DEFAULT` live in `config.ts`**, not
+`index.ts` as the constants table says, because `config.ts`'s defaults need them and `index.ts`
+imports `config.ts` (a cycle otherwise); `index.ts` re-exports them under the plan's names.
+`MAX_SKIP_CYCLES` is in `index.ts`.
+
+**Step A's rule order versus test 23.** The plan lists "exactly one element `=== PATH_PLACEHOLDER`"
+before "no other element `.includes(PATH_PLACEHOLDER)`". Test 23's embedded case
+`['--workdir=${path}']` has ZERO exact elements, so under that order it gets the exactly-one message,
+not the `must not embed` message the same test requires. Shipped: the embed check runs first. Every
+other input yields the same message under either order.
+
+**Decisions the section leaves open.** (1) A repo discovered but not yet read is `unavailable` with
+no `metaReason` — the reason set is closed and has no "pending" code; Task 9 should render
+`unavailable` without a reason as "not read yet", not as a fault. (2) Discovery's in-place rebuild
+CARRIES the previous entry's metadata for a path that survives it, and drops backoff entries for
+paths that vanished; otherwise every 10-minute discovery would blank every row until the next
+30-second metadata cycle. (3) `resolveBranch` accepts a `head-name` only under `refs/heads/`; a rebase
+started from a detached HEAD writes `detached HEAD` there and yields no branch. (4) `readAll` reuses
+T7's `mapBounded`, which is the shared-cursor pool the plan describes, and wraps each `readOne` so an
+unexpected throw maps to `git-error` and the pass cannot reject.
+
+**Mutation rows, literal vs realisable (full table with messages in the T8 report):**
+
+| # | Form run | Red | Test(s) |
+|---|---|---|---|
+| M1 | literal | 263 / 1 | 1: `"empty"` → `"clean"` |
+| M1b | literal | 263 / 1 | 1: `"ok"` → `"unavailable"` |
+| M2 | literal | 261 / 3 | 18, 19, 20 (20 fails on `buildArgv`'s non-string-argument message, since `{}.path` is undefined — still red) |
+| M3 | realisable: `find(k => path.startsWith(k))` then `get` (the plan's `.some` returns a boolean, not an entry) | 262 / 2 | 18 (subdirectory), 19 |
+| M4 | literal | 262 / 2 | 2, 15: `"bare"` → `"git-error"` |
+| M5 | literal | 262 / 2 | 10: `"timeout"` → `"git-error"`; 11: `"stale"` → `"unavailable"` |
+| M6 | literal | 263 / 1 | 10: `uncommittedCount` `Received: 0` |
+| M7 | literal | 263 / 1 | 10: two status lines after pass two |
+| M8 | literal | 262 / 2 | 3, 4: `"rebasing"` → `"detached"` |
+| M9 | literal — **GREEN** on the suite as the plan lists it (no fixture had a plain detached HEAD; test 3's repo is rebasing and takes the head-name path). Realisable at the assignment site (`entry.branch = parsed.branchHead`): 262 / 2, tests 3 and 4. Then `fb54be1` adds a detached repo to test 3 (`detachHead`), after which the literal is **263 / 1**, test 3, `Received: "(detached)"`. Task 10 should expect the literal to redden test 3 | | |
+| M10 | literal | 252 / 12 | 12 and 1, 3, 4, 5, 6, 7, 8, 11, 14, 16 (exit 129 → `unavailable`/`git-error`), plus T7's 29 |
+| M11 | literal | 261 / 3 | 7: `47` → `1`; 11: `3` → `1`; 12 (`-uall` missing) |
+| M12 | literal | 262 / 2 | 16 (`metaCheckedAt` on the wire), T7's 29 (`gitDir`). Test 15 stays green, exactly as the plan's parenthetical predicts: `setUnavailable` deletes, so a spread cannot resurrect the keys |
+| M13 | literal | 263 / 1 | 8 (15 stays green: its bare repo never had values to keep) |
+| M14 | realisable: return `{ repos, dropped: [], errors: [], scannedAt, staleDays }` — "only what the pass read" is every repo, so `repos` alone cannot redden; test 13's `dropped`/`errors` halves are what bite | 261 / 3 | 13, 19, T7's 29 |
+| M15 | literal (`new Map(table)` and `lastCfg` captured before `provider`) | 259 / 5 | 17, 18, 19, 20, 22 — all on `configuration has not been loaded yet` (the config half fires first; a copied table alone would be green because the check precedes `resolveTarget`) |
+| M16 | literal — **GREEN 264 / 0**, as the plan predicts. Every accepted template has the placeholder as a whole element, on which `replace` and exact comparison agree; the parse-time `must not embed` rejection (test 23) is the control. Task 10 should expect green | | |
+| M17 | BOTH directions red, 263 / 1 each, test 9 `"git-error"` → `"gone"`. (a) The plan's literal (narrowing dropped): the plan predicted green, but test 9 pins the REASON and `'ENOENT' !== 0` goes to `gone`. (b) A string code treated as success: the empty stdout trips the empty-gitdir guard → `gone`. Test 9 is pinning | | |
+
+**Wall-clock.** One metadata cycle over the nine-repo fixture set (25 git calls): 12.5 ms median at
+concurrency 8, 36.6 ms at concurrency 1 — ~1.5 ms per call including `resolveGit()`'s PATH scan.
+Recorded in the comment on the metadata branch. `rungit.ts` untouched.
+
+**The failure-record channel (brief G7).** `readAll` cannot reject: `runGit` never rejects, every
+state-file read is in try/catch, and `readOne` is wrapped so anything unexpected maps to the closed-set
+`git-error`. `index.ts` still contains no `throw`. `actions.ts` throws exactly two fixed strings
+from `resolveTarget` and one from `argv`, none of which echoes the client's path; they reach the 400
+body through `routes.ts`'s catch, which is the correct classification. `config.ts` throws the plan's
+fixed messages with `${key}` (an operator-typed key name) as the only interpolation.
+
+**The bare-pathspec bug (brief G8).** T7's addendum recorded that `classify`'s rows 2–4 pass `rel` as
+a bare pathspec after `--`, where `:(literal)` is the fix. Per the plan's out-of-scope rule and the
+brief's ruling it is NOT fixed here; **carried to Task 10 / a T7 follow-up**. T8's three call shapes
+have no positional at all, so it does not touch the metadata pass.
+
+**Ruling E** appended to `docs/decisions/0002-slice-rulings.md` (`5521e9b`): the no-op is accepted
+as-is for this slice; the consequence is named in one sentence.
+
+**Residual, stated for Task 9/10.** The scheduler runs the two schedules independently, so a 10-minute
+discovery can overlap a 30-second metadata pass; the metadata pass snapshots `[...table.values()]`
+at its start and writes into those entry objects, which discovery may meanwhile have replaced. The
+carry-over on rebuild means the next metadata cycle heals it; nothing is lost except at most one
+cycle's freshness on the overlapped rows. Not a defect in this task's scope; recorded.
