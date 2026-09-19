@@ -564,6 +564,7 @@ test('atrium open --print-url prints the boot handoff from the file and does not
   // finally only kills, waits, captures and removes.
   let before = ''
   let sessionToken = ''
+  let openErr = ''
   let logs = ''
   try {
     expect(await waitForFile(hp)).toBe(true)
@@ -574,6 +575,7 @@ test('atrium open --print-url prints the boot handoff from the file and does not
       { env, stderr: 'pipe', stdout: 'pipe' },
     )
     const out = await new Response(open.stdout).text()
+    openErr = await new Response(open.stderr).text()
     expect(await open.exited).toBe(0)
     // MUTATION: mint a fresh token in `case 'open'` instead of printing the
     // file's. The token is the whole of the URL that matters.
@@ -619,6 +621,14 @@ test('atrium open --print-url prints the boot handoff from the file and does not
   // console.error(`atrium: session token ${auth.sessionToken}`) after the
   // mint in startServer — this line, and only this line, reddens.
   expect(logs).not.toContain(sessionToken)
+
+  // `open`'s success path pipes stderr, and nothing read it back — measured,
+  // the handoff echoed there left the suite at 184/0. stdout is the URL a
+  // launcher consumes; stderr is the journal under systemd, and one is a
+  // credential exactly as much as the other. MUTATION: in src/index.ts
+  // `case 'open'`, console.error(`atrium: debug: printing handoff ${h.token}`)
+  // before the URL console.log.
+  expect(openErr).not.toContain(before)
 })
 
 // Three mutations, one per assertion group in this test, all run RED then
