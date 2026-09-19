@@ -3,7 +3,8 @@ import { existsSync, lstatSync, readdirSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, join, relative, sep } from 'node:path'
 import { runGit } from '../../core/rungit.ts'
-import type { ReposConfig } from './config.ts'
+import type { FetchCtx, Provider } from '../../core/contract.ts'
+import { reposConfigSchema, type ReposConfig } from './config.ts'
 
 /**
  * The repos provider, discovery half (Task 7): walk the configured roots,
@@ -358,3 +359,131 @@ async function discover(cfg: ReposConfig, deps: Required<ReposProviderDeps>, sig
   return { repos: repos.sort(byPath), dropped: dropped.sort(byPath), errors }
 }
 
+
+// --- G. Redaction ----------------------------------------------------------------
+
+/**
+ * The wire types. Task 8 EXTENDS `RepoWire` with its metadata fields and
+ * extends the allowlist to match; Task 9 imports both interfaces type-only.
+ */
+export interface RepoWire { id: string; path: string; name: string; bare: boolean; origin: 'top-level' | 'container-child' }
+export interface DroppedWire { id: string; name: string; reason: DropReason }
+export interface ReposWire {
+  repos: RepoWire[]
+  dropped: DroppedWire[]
+  errors: ReposErrorCode[]
+  scannedAt: number
+  staleDays: number
+}
+
+/**
+ * An explicit field-by-field ALLOWLIST, never `{ ...data }` with deletions.
+ *
+ * A surfaced repo's `path` is on the wire ON PURPOSE (settled cross-task
+ * ruling): it is the identifier Task 9's action buttons post back and the key
+ * Task 8's `resolveTarget` validates against the discovered table, which is
+ * the control that makes accepting it safe. Residual, stated plainly:
+ * absolute $HOME-relative repository paths reach an authenticated,
+ * same-origin client.
+ *
+ * `gitDir` never crosses this seam, and neither does any DROPPED candidate's
+ * path — a dropped candidate is not an action target, so it gets `id` and
+ * `name` only. No raw git stdout/stderr is ever stored on an entry, so
+ * nothing but parsed scalars can reach here.
+ */
+export function reposToClient(data: ReposData): ReposWire {
+  return {
+    repos: data.repos.map((r) => ({ id: r.id, path: r.path, name: r.name, bare: r.bare, origin: r.origin })),
+    dropped: data.dropped.map((d) => ({ id: d.id, name: d.name, reason: d.reason })),
+    errors: [...data.errors],
+    scannedAt: data.scannedAt,
+    staleDays: data.staleDays,
+  }
+}
+
+// --- F. The provider object --------------------------------------------------------
+
+/**
+ * A FACTORY, not a module singleton: each call owns its own repo table, so
+ * fixture tests are isolated and "providers are fetch(cfg) → Data, testable
+ * against fixtures" survives.
+ */
+export function createReposProvider(deps: ReposProviderDeps = {}): Provider<ReposConfig, ReposData> {
+  const resolved: Required<ReposProviderDeps> = {
+    homeDir: deps.homeDir ?? homedir(),
+    classifyTimeoutMs: deps.classifyTimeoutMs ?? DEFAULT_CLASSIFY_TIMEOUT_MS,
+  }
+
+  // Closure state. `table` is a MAP keyed by absolute realpath, not an array:
+  // Task 8's resolveTarget validates an action target by exact string equality
+  // against a key of this map, and reads it through a getter — so a discovery
+  // pass rebuilds it IN PLACE (clear then set) rather than replacing it.
+  // `lastCfg` is set at the top of fetch; Task 8's action layer reads it
+  // through a getter (exec actions get no cfg).
+  const table = new Map<string, RepoEntry>()
+  let dropped: DroppedCandidate[] = []
+  let errors: ReposErrorCode[] = []
+  let scannedAt = 0
+  let lastCfg: ReposConfig | undefined
+
+  function buildData(cfg: ReposConfig): ReposData {
+    return {
+      repos: [...table.values()].sort(byPath),
+      dropped: [...dropped],
+      errors: [...errors],
+      scannedAt,
+      staleDays: cfg.staleDays,
+    }
+  }
+
+  /**
+   * RULE: every schedule branch returns the FULL merged ReposData. The
+   * scheduler's `last` map is keyed by provider id alone, so a branch
+   * returning a metadata-only fragment would overwrite the repo list in
+   * snapshot() every 30 seconds. Per-schedule keying of `last` is deferred
+   * debt; this rule plus test 25 is what stands in for it. The default
+   * branch is TOTAL: an unknown schedule name never throws and never returns
+   * a partial object.
+   *
+   * Nothing here throws: a missing or unreadable root, a broken candidate and
+   * a timed-out git call are all reported on the closed-set channels
+   * (`errors`, `dropped`), never as an exception — whose message the
+   * scheduler would otherwise serve verbatim as lastErrorMessage.
+   */
+  async function fetch(cfg: ReposConfig, ctx: FetchCtx<ReposData>): Promise<ReposData> {
+    lastCfg = cfg
+    switch (ctx.schedule) {
+      case 'discovery': {
+        const outcome = await discover(cfg, resolved, ctx.signal)
+        if (ctx.signal.aborted) return buildData(cfg)
+        table.clear()
+        for (const r of outcome.repos) table.set(r.path, r)
+        dropped = outcome.dropped
+        errors = outcome.errors
+        scannedAt = Date.now()
+        return buildData(cfg)
+      }
+      case 'metadata':
+        // Task 8 replaces this branch body with the per-repo metadata pass.
+        return buildData(cfg)
+      default:
+        return buildData(cfg)
+    }
+  }
+
+  const provider: Provider<ReposConfig, ReposData> = {
+    id: 'repos',
+    configSchema: reposConfigSchema,
+    // First run (detect → confirm → persist) is deferred by this plan; detect
+    // stays a required contract member with no caller.
+    detect: async () => ({ kind: 'nothing-to-detect', reason: 'first run is not implemented in this slice' }),
+    schedules: [
+      { name: 'discovery', intervalMs: DISCOVERY_INTERVAL_MS, runOnStart: true },
+      { name: 'metadata', intervalMs: METADATA_INTERVAL_MS, runOnStart: true },
+    ],
+    fetch,
+    toClient: reposToClient,
+    actions: [], // Task 8 fills this.
+  }
+  return provider
+}
