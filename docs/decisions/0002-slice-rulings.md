@@ -418,3 +418,50 @@ that one — a future `atrium doctor` is the place both get checked.
   **Revisit if** either token becomes reachable from off this host, or if the handoff map ever holds enough
   entries for lookup timing to carry structure — concretely, if anything other than `startServer`'s single boot
   mint ever calls `mintHandoff`.
+
+## Ruling E — no user bus: the three repos exec actions are a silent no-op, accepted
+
+Appended by Task 8, which ships the three `exec` actions Ruling B settled on (`open-editor`,
+`open-terminal`, `open-claude` on the `repos` provider). This ruling settles carry-forward P1 for all
+three at once, as measured facts about the code that already ships, and records the decision taken.
+
+### The facts, from the shipped source
+
+- `spawnDetached` (`src/core/actions.ts:97-109`) wraps **every** exec action in
+  `systemd-run --user --scope --quiet --collect -- <cmd> <args…>` (`:98-102`). The default launcher is
+  `'systemd-run'` (`:98`); only the test suite overrides it.
+- Its fallback (`:104-108`) fires **only on the child's `error` event** — the launcher failing to *start*
+  (ENOENT, EACCES: no `systemd-run` binary at all). It is deliberately not keyed on exit status, and the
+  comment at `:85-90` says why: `systemd-run --scope` forwards the wrapped command's own exit code, so keying on
+  it would relaunch every editor that exited non-zero a second time, bare and unscoped.
+- With `systemd-run` **present but no user bus** (no `DBUS_SESSION_BUS_ADDRESS`, no
+  `$XDG_RUNTIME_DIR/bus` — a bare SSH session, a container, a `systemctl --user` unit started without a
+  session), the launcher *starts*, fails to connect to the manager, prints to a stderr that is `'ignore'`d,
+  and exits 1. No `error` event fires. The fallback does not run. Nothing runs.
+- The route still answers `{ok: true}`: `dispatch` resolves `Promise<void>` after `spawnDetached` returns
+  (`src/core/actions.ts:138-142`), and `src/server/routes.ts:73-76` has no result channel — it awaits
+  `dispatch` and returns `Response.json({ ok: true })`.
+
+All three of Task 8's actions inherit every line of that. They add target validation *before* argv is built
+(`src/providers/repos/actions.ts`, `resolveTarget`) and nothing after it.
+
+### The decision
+
+**Accepted as-is for this slice.** The alternatives were weighed and rejected here:
+
+- *Probe for a user bus and select the launcher per call* (bare `spawn` when there is no bus) would need
+  `DispatchOptions`, `dispatch` and `routes.ts` to change — `src/core/**` and `src/server/**` are not Task 8's,
+  and per-call launcher selection is exactly the "relaunch bare and unscoped" shape §9 mandates the scope to
+  prevent.
+- *A result channel on `exec`* (report the launcher's exit status to the client) is the same contract change
+  Ruling B already deferred for `show diff`: `Action`'s exec arm would gain a result, `dispatch` would stop
+  being `Promise<void>`, and the route would need a body. Deferred with it.
+
+### The consequence, in one sentence
+
+A user without a session bus — or without the configured `cmd` (`code`, `konsole`) installed at all — clicks
+one of the three buttons and **nothing happens, with no error anywhere**: not in the response, not in the
+pane, not in the server log. The next plan that touches `src/core/actions.ts` should pick this up together
+with Ruling B's result channel.
+
+**Revisit if** a result channel is added to the `exec` arm, or if the launcher is ever selected per call.
