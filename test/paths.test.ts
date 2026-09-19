@@ -41,9 +41,15 @@ describe('isCompiledPath', () => {
 // is not a tidiness preference — it is the whole of the file's protection.
 //
 // Synthetic env objects only: the plan forbids any assertion derived from
-// $HOME, and the mutation these guard against (`handoffPath` ignoring
-// XDG_RUNTIME_DIR and resolving through configDir) would otherwise make the
-// expected value depend on the developer's home directory.
+// $HOME, and the mutation the FIRST of these guards against (`handoffPath`
+// ignoring XDG_RUNTIME_DIR and resolving through configDir) would otherwise
+// make the expected value depend on the developer's home directory.
+//
+// Singular on purpose. Measured under that mutation: `bun test
+// test/paths.test.ts` is 10 pass / 1 fail and the sibling test below is the
+// only red one. The fallback test supplies no XDG_RUNTIME_DIR, so the mutated
+// expression is exactly the one it already expects — it stays GREEN, and it
+// therefore names a mutation of its own.
 describe('handoffPath', () => {
   test('handoffPath and endpointPath are siblings in the runtime directory', () => {
     const env = { XDG_RUNTIME_DIR: '/run/user/1000' } as NodeJS.ProcessEnv
@@ -54,6 +60,18 @@ describe('handoffPath', () => {
   })
 
   test('handoffPath falls back to the config dir when XDG_RUNTIME_DIR is unset', () => {
+    // $XDG_RUNTIME_DIR does not exist on macOS or Windows. MUTATION: drop the
+    // fallback — `runtimeDir` returning join(env.XDG_RUNTIME_DIR!, 'atrium'),
+    // the tidy-up TypeScript itself nudges you toward and that a Linux-only CI
+    // never notices, because the variable is always set there. Measured,
+    // scoped: 10 pass / 1 fail, `TypeError: The "paths[0]" property must be of
+    // type string, got undefined`.
+    //
+    // Two config tests reach the same branch through startServer (their env is
+    // XDG_CONFIG_HOME only) and so redden on a mutation that THROWS — but they
+    // assert nothing about the resolved path, so a fallback quietly rewritten
+    // to some other valid directory would leave them green. This is the only
+    // test that pins the VALUE in the unset case.
     const env = { XDG_CONFIG_HOME: '/home/u/.config' } as NodeJS.ProcessEnv
     expect(handoffPath(env)).toBe('/home/u/.config/atrium/handoff.json')
     expect(dirname(handoffPath(env))).toBe(dirname(endpointPath(env)))
