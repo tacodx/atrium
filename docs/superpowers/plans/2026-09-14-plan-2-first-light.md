@@ -5558,3 +5558,77 @@ that the tree is green and unmutated at the end.
 
 ---
 
+
+#### Task 7 addendum — the root probe, test 29's name, every mutation row measured, and the failure-record channel
+
+> Recorded HERE, in the tracked plan, for the same reason Tasks 3–6's were: **Task 10 re-runs this
+> whole mutation table**, `.superpowers/sdd/` is gitignored, and a row that cannot redden its named
+> test would read as a regression when Task 10 runs it. Every row below was run on `fc15370` plus
+> this task's commits, the plan's literal text first, on the FULL suite (`bun test`) plus
+> `bun run typecheck`, by exact-string replacement that refuses to apply unless every target occurs
+> exactly once, then reverted with `git checkout` (diff-stat verified empty) and re-run green.
+> Baseline 206 pass / 0 fail / 567 expect() across 15 files; exit **236 / 0 / 651 across 16 files**
+> (+30 tests, all in `test/repos-discovery.test.ts`). Every mutant typechecks (exit 0).
+
+**Pre-code audit (fc15370).** `src/providers/` did not exist, so every M1–M11 target was absent and
+`test/repos-discovery.test.ts` did not exist; no row could redden before the code landed. The real
+measurement is the one below.
+
+**Where this section contradicts itself: the walker rule versus test 8 and M4.** Step C makes a
+directory a candidate only when it has a `.git` or is bare-shaped. Test 8 names `<root>/proj/src` — a
+plain directory with neither — as an `extraRoots` entry and requires it in `dropped` as `invalid`
+("the containment-comparison pin"), and M4 requires deleting the containment comparison to redden
+test 8. Under Step C's literal rule `src` is never a candidate, never reaches the gate, and neither
+test 8 nor M4 can bite (measured: first run of the test file, 29 / 1, `Received: []`). The
+alternative reading — every root is an unconditional candidate — reports every user's `$HOME` and
+every `extraRoots: ['/srv/projects']` as a dropped `invalid` repository on every scan, because
+`rev-parse --absolute-git-dir` exits 128 there (measured). Shipped (`40f3657`): **every root is
+probed by the gate**; a root that is not structurally a candidate and fails the exit-code half is
+silently not a candidate (a directory of projects, not a broken repository — no `dropped` row, no
+error); one that exits 0 is inside some repository and goes through the containment comparison,
+which drops it as `invalid` unless it is itself a repo. `ScanState.probes` carries the rationale.
+Non-root directories keep Step C's rule exactly.
+
+**Test 29's name (brief G7).** The M10 row says `'reposToClient emits no absolute path and no
+gitDir'`; the test list says `'reposToClient emits no gitDir and no dropped-candidate path'`. The
+test-list name is shipped — "no absolute path" contradicts the settled ruling that a surfaced repo's
+`path` IS on the wire. Task 10 should look for the test-list name.
+
+**Step G's compile-safe const form is moot (brief G6).** Task 5 has landed; `toClient` is a required
+member and the provider carries `toClient: reposToClient` on a `const provider: Provider<ReposConfig,
+ReposData>`. typecheck 0.
+
+| # | The plan says | Measured | The realisable row |
+|---|---|---|---|
+| M1 | delete Row 4 (container) → Test 16 | **232 / 4** — Test 16 as named (`Expected length: 4 / Received length: 1`) **plus 22, 23 and 24**, all consistent with the mutant: `treatAsContainer` lives in Row 4 (22), the false-positive clone is a Row-4 surface (23), and the `check-ignore` call that the shim slows is gone, so nothing times out (24, on the positive guard) | as written; expect four |
+| M2 | move Row 4 above Row 1 | Row 4 needs `parent`/`rel`, which are computed after Row 1, so the literal move does not compile; realised as a `if (parent !== undefined) { const rel = …; <Row 4> }` block inserted before Row 1 with the original Row 4 removed. **235 / 1** — exactly Test 17 (`+ "…/repo/worktrees/feat"` in `repos`) | the guarded-block form |
+| M3 | delete the `timedOut` short-circuit → Test 24 | All three classifier `timedOut` returns deleted (rows 2, 3, 4). **235 / 1** — exactly Test 24, on the positive guard (`Expected: true / Received: false`: the timed-out `check-ignore` reads as code 1, "not ignored", and the kids fall to `ambiguous`) | as written |
+| M4 | delete the containment comparison → Test 8 | Replaced with `return { kind: 'valid', entry: { …, bare: gitDir === candidate } }`. **235 / 1** — exactly Test 8, but on the SECOND assertion: `src` passes the gate, the classifier finds parent `proj`, rows 2–4 all miss, and it lands in `dropped` as `ambiguous` (`reason: "ambiguous"` vs `"invalid"`). `repos` is still `[proj]`, so the first assertion holds | as written; the red is on `reason` |
+| M5 | swap Rows 2 and 3 → Test 19 | **235 / 1** — exactly Test 19 (`- "reason": "submodule" / + "reason": "vendored"`) | as written |
+| M6 | Row 5 drops without pushing into `dropped` → Test 21 | Realised at the one push site in `discover`: `if (c.reason !== 'ambiguous') dropped.push(…)`. **235 / 1** — exactly Test 21 (`- Expected - 8 / + Received + 1`: `dropped` is `[]`) | the push-site form |
+| M7 | `'metadata'` → `{ ...buildData(cfg), repos: [] }` → Test 25 | **235 / 1** — exactly Test 25 (`- Expected - 10 / + Received + 1`) | as written |
+| M8 | remove the `n.startsWith('.')` prune → Test 13 | **235 / 1** — exactly Test 13 (`+ "path": "…/.dotfiles/cfg"` on the default-config half) | as written |
+| M9 | `parse` body → `return x as ReposConfig` → Test 1 (and 2, 3, 4) | **206 / 30** — Tests 1–4 as named (`Received: undefined`; `Received function did not throw`) **and all 26 remaining tests in the file**, because every one drives `fetch` with `parse(undefined)` and `cfg.extraRoots` on `undefined` throws. Only this file is affected; the other 206 stay green | as written; expect the whole file |
+| M10 | `reposToClient` → `return data` → Test 29 | Realised as `return data` inserted before the allowlist (typechecks: `ReposData` is structurally assignable to `ReposWire`). **235 / 1** — exactly Test 29 (`+ "path": "…/zero"` in `dropped`; the `gitDir` assertion is reached only if that one passes) | as written, under the test-list name |
+| M11 | gate accept → `code !== 128`; check 6 and 7; if both stay green, strengthen 6 | **236 / 0 — GREEN, both before and after the strengthening.** Test 6 now also asserts `errors` is `[]` and that a root holding only a non-repo directory tree yields `repos`, `dropped` and `errors` all `[]` (`acc4588`); re-measured **236 / 0**. It cannot be otherwise on this machine: every fixture-producible gate failure (non-repo, 0-byte `.git`, dangling pointer) exits exactly 128 on git 2.55.0; a timeout is taken by the `timedOut` branch before the code is compared; the string `'ENOENT'` needs a machine with no git binary; and a plain directory tree never reaches the gate at all. The `typeof code === 'number'` narrowing is a code requirement held by review (`isCodeZero` is the only comparison site in the gate and the classifier) — tsc does not enforce it either, since `number | string === 0` compiles | **tests-check only**; Task 10 should expect green and not count it as a regression |
+
+**The failure-record channel (brief G8).** `src/providers/repos/index.ts` contains no `throw`.
+Every fs call that can throw with a path in its message is guarded (`realpathSync` via
+`safeRealpath`, `readdirSync` → `'root-unreadable'`, `lstatSync` behind `existsSync`); `runGit`
+never rejects; the gate and the classifier each run per candidate inside a try/catch that pushes
+`'candidate-error'` and drops the candidate as `'invalid'`. So `fetch` cannot put a path, git output
+or Data into `schedules.discovery.lastErrorMessage`. `config.ts` throws only this section's fixed
+strings; its one interpolation is the offending key NAME in `unknown key "…"`, which is
+operator-typed config. Test 30 pins that no error code contains a `/`.
+
+**Other corrections to the section, all applied.**
+
+- `breakGitPointer` removes the existing `.git` (directory or file) before writing the dangling
+  pointer, so it works on a repo built by `makeRepoIn`; the section's "overwrite" would fail on a
+  `.git` directory.
+- The three conflict builders assert the operation exits exactly 1 and rethrow anything else; a
+  builder that silently succeeded would hand Task 8 a non-conflicted repo.
+- Row 4 skips the `check-ignore` call when the parent is a configured container (the section says
+  the entry "forces this row to match regardless"; there is nothing to ask git).
+- Roots and every walked directory are already realpath-resolved (roots by `realpathSync`, children
+  because symlinks are never followed), so candidates are not re-resolved.
