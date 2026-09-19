@@ -67,9 +67,10 @@ async function pollUntil(cond: () => boolean, timeoutMs: number, intervalMs = 50
 async function authedSocket(port: number, token: string): Promise<Socket> {
   const s = await openSocket(port)
   s.sock.send(JSON.stringify({ type: 'auth', token }))
+  // Drains two frames and asserts nothing about them: test 2 owns the
+  // ready-then-snapshot claim, and a helper that re-asserted it would turn
+  // every caller red under M2 and blur which test pins the order.
   await waitForFrames(s, 2)
-  expect(parsed(s.frames[0]!).type).toBe('ready')
-  expect(parsed(s.frames[1]!).type).toBe('snapshot')
   return s
 }
 
