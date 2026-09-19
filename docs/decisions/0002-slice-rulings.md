@@ -383,8 +383,9 @@ that one — a future `atrium doctor` is the place both get checked.
   line), every static asset, `POST /api/session` itself, and the `/ws` upgrade — which any local process can
   reach with a forged Host/Origin and hold for up to `DEFAULT_WS_AUTH_TIMEOUT_MS`, receiving **zero** application
   data, which is the control that makes a forgeable Origin survivable (§8.4).
-- **Comparison is `===` on strings and `Map.get` on the handoff — not constant-time.** Out of scope, and that
-  conclusion stands — but the reason first recorded here is wrong, and is corrected in place rather than removed.
+- **Comparison is `===` on strings and `Map.get` on the handoff — not constant-time.** Out of scope by the task's
+  own ruling, and that conclusion stands — but the reason first recorded here is wrong, and is corrected in place
+  rather than removed.
 
   It said the boundary is the **uid**: "a same-uid process can read the 0600 file outright, so a timing side
   channel is never the cheapest attack available." That does not describe the attacker who can actually reach
@@ -398,16 +399,22 @@ that one — a future `atrium doctor` is the place both get checked.
   - **Guessing** is out of reach on entropy alone. Both tokens are 32 bytes from `crypto.getRandomValues` —
     **256 bits**, CSPRNG, re-minted on every server start.
   - **Measuring** is the part a non-constant-time compare actually exposes, and what it exposes is a prefix, one
-    byte at a time. Entropy does not help there; the noise floor does. The per-byte signal is a few nanoseconds
-    of string comparison, under a loopback round trip that already includes a `URL` parse, the Host/Origin gate
-    and a JSON parse — microseconds of jitter — so each byte costs a large sampling campaign against a token that
-    dies with the process.
-  - The handoff side offers even less: `handoffs` holds **exactly one entry** for the life of the process, so
-    `Map.get` has no sibling entry to be faster or slower than, and a wrong 43-character token almost never
-    collides into the one occupied bucket, so a miss usually never reaches a string comparison at all.
+    comparison chunk at a time — a byte in the textbook model, a machine word or more in practice, whatever the
+    runtime's early exit is actually granular to. Anything coarser than a byte only makes the dismissed attack
+    weaker: each step then has to enumerate a whole chunk to find the one that runs longer. Entropy does not help
+    there; the noise floor does. The per-chunk signal is a few nanoseconds of string comparison, under a loopback
+    round trip that already includes a `URL` parse, the Host/Origin gate and a JSON parse — microseconds of
+    jitter — so each chunk costs a large sampling campaign, against a token that is re-minted on every restart.
+  - The handoff side offers even less: `handoffs` holds **at most one entry** — one between boot and redemption,
+    zero after it, since `consumeHandoff` deletes on trade — so in either state `Map.get` has no sibling entry
+    to be faster or slower than. (As first written this bullet said "exactly one entry for the life of the
+    process", which is false after redemption, and went on to reason about hash-bucket collisions on a miss.
+    That was a claim about the engine's `Map` internals which this ADR neither names nor needs; it is dropped,
+    and the ruling stands on entropy and the noise floor without it.)
 
   This is an analytical argument, **not a measurement**. Nobody has timed these operations, and nothing here
   claims otherwise.
 
   **Revisit if** either token becomes reachable from off this host, or if the handoff map ever holds enough
-  entries for lookup timing to carry structure.
+  entries for lookup timing to carry structure — concretely, if anything other than `startServer`'s single boot
+  mint ever calls `mintHandoff`.
