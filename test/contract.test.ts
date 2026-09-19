@@ -346,7 +346,14 @@ describe('scheduler', () => {
     // but not identical, and only this line goes red.
     expect((pushed[0] as any).data).toBe((s.snapshot() as any).repos.data)
 
-    // runNow's own resolution stays RAW — internal, never serialized.
+    // runNow's own resolution stays RAW — internal, never serialized. Pins
+    // runNow's `return data` in src/core/scheduler.ts.
+    //
+    // M8 (raw return redacted: `return data` → `return p.toClient(data)`): only
+    // this line goes red (Expected the sentinel / Received undefined). The
+    // spelling `return wire` is not a runnable mutant: `wire` is scoped to the
+    // `if (!ac.signal.aborted)` block, so it is TS2304 under typecheck and a
+    // ReferenceError that reddens every test with a successful run.
     expect((raw as any).token).toBe(SENTINEL)
   })
 
@@ -378,6 +385,13 @@ describe('scheduler', () => {
     // nothing carrying Data reached either wire.
     expect((s.snapshot() as any).broken?.data).toBeUndefined()
     expect((s.snapshot() as any).broken?.schedules.poll?.consecutiveFailures).toBe(1)
+    // `every` is vacuously true on an empty array, so the line after this one
+    // could never fail on its own. Pin that the catch arm DID notify, so the
+    // "nothing carrying Data reached either wire" claim is about one real
+    // envelope. M7 (catch-arm `notify(providerId)` removed): this line goes red
+    // (Expected 1 / Received 0); test/scheduler-lifecycle.test.ts's `onUpdate
+    // carries the status envelope …` goes red with it.
+    expect(pushed).toHaveLength(1)
     expect(pushed.every(st => (st as any)?.data === undefined)).toBe(true)
     expect(JSON.stringify(s.snapshot())).not.toContain(SENTINEL)
     expect(JSON.stringify(pushed)).not.toContain(SENTINEL)
