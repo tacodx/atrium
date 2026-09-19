@@ -45,9 +45,16 @@ export function connect(deps: SocketDeps): SocketHandle {
     })
 
     ws.addEventListener('message', (ev) => {
-      let frame: ServerFrame
-      try { frame = JSON.parse(String((ev as MessageEvent).data)) as ServerFrame } catch { return }   // never throw into the handler
-      if (frame?.type === 'ready') {
+      let parsed: unknown
+      try { parsed = JSON.parse(String((ev as MessageEvent).data)) } catch { return }   // never throw into the handler
+      // JSON.parse succeeds on `null`, `42` and `"str"` as well, and onFrame
+      // ends at store.apply, which reads frame.type — so a body of `null`
+      // raises a TypeError INSIDE the WebSocket event listener, the one thing
+      // the parse try/catch exists to prevent. Only a non-null object gets
+      // past here (test 19, M24).
+      if (typeof parsed !== 'object' || parsed === null) return
+      const frame = parsed as ServerFrame
+      if (frame.type === 'ready') {
         attempt = 0
         deps.onOpen()
       }

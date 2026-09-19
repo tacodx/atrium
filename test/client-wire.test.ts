@@ -9,7 +9,8 @@ import type { ServerFrame } from '../src/core/wire'
 // No server, no ports, no DOM — every dependency is injected. These exist
 // because the scoping doc specifies the ORDERING and FAILURE HANDLING of the
 // client modules explicitly, and an ordering requirement with no test is a
-// comment. Numbered 9-16 to match the plan's Task 6 test list.
+// comment. Numbered 9-16 to match the plan's Task 6 test list; test 19 is
+// the fix round's addition and has no number in that list.
 
 // ---- session (tests 9-11) ---------------------------------------------------
 
@@ -232,4 +233,34 @@ test('a snapshot frame latches hasSnapshot, and a disconnect does not clear it',
   store.setConnected(false)
   expect(store.getSnapshot().connected).toBe(false)
   expect(store.getSnapshot().hasSnapshot).toBe(true)
+})
+
+// ---- socket x store (the fix round's test 19) -------------------------------
+
+test('a junk message body neither throws out of the listener nor moves the store', () => {
+  const sockets = fakeSocketFactory()
+  const timers = fakeTimers()
+  const store = createStore()                       // the REAL store, not a spy
+  connect(socketDeps({
+    createSocket: sockets.createSocket,
+    setTimer: timers.setTimer,
+    clearTimer: timers.clearTimer,
+    onFrame: (frame) => { store.apply(frame) },
+  }))
+  const ws = sockets.created[0]!
+  ws.fire('open')
+  store.apply(snapshotFrame({ a: { data: { n: 1 }, schedules: {} } }))
+  const before = store.getSnapshot()
+
+  // Only `not json` makes JSON.parse throw, and the handler's try/catch
+  // already covered that one. `null` is the live hazard: it parses, and
+  // store.apply(null) reads frame.type — a TypeError raised inside a
+  // WebSocket event listener, which the same rule forbids. MUTATION M24:
+  // delete `if (typeof parsed !== 'object' || parsed === null) return` from
+  // the message handler; the `null` body alone turns this red.
+  for (const data of ['null', '42', '"str"', 'not json']) {
+    expect(() => ws.fire('message', { data })).not.toThrow()
+  }
+  expect(store.getSnapshot()).toBe(before)
+  expect(store.getSnapshot().providers.a).toEqual({ data: { n: 1 }, schedules: {} })
 })
