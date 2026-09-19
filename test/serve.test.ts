@@ -312,6 +312,16 @@ test('a handoff redeemed at POST /api/session returns a session token that is ac
     const body = await res.json()
     expect(typeof body.token).toBe('string')
 
+    // This 200 IS the bearer, and it is the one response in the process that
+    // carries a credential in its body. The existing `every response carries
+    // the standard security headers` test only exercises /healthz, so nothing
+    // pinned this route. MUTATION: drop `, { headers }` from the
+    // `Response.json` at the end of the /api/session block — the credential
+    // then ships with cache-control null and CSP null, cacheable by anything
+    // between the page and the server, and the suite stays green without this.
+    expect(res.headers.get('cache-control')).toBe('no-store')
+    expect(res.headers.get('content-security-policy')).toContain("frame-ancestors 'none'")
+
     // THE assertion this whole task exists for. MUTATION: the bearer branch to
     // `if (true)`. Nothing else in the suite presents a valid bearer, so
     // without this line rejecting every legitimate client is invisible.
