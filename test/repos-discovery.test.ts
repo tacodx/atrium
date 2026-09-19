@@ -386,7 +386,10 @@ test('reposToClient emits no gitDir and no dropped-candidate path', async () => 
   const root = makeScanRoot()
   const proj = makeRepoIn(root, 'proj')
   const zero = makeZeroByteGitFile(root, 'zero')
-  const data = await discover(root)
+  const p = createReposProvider({ homeDir: root })
+  const cfg = reposConfigSchema.parse(undefined)
+  await p.fetch(cfg, ctx('discovery'))
+  const data = await p.fetch(cfg, ctx('metadata'))
   expect(data.repos).toHaveLength(1)
   expect(data.dropped).toHaveLength(1)
   const wire = reposToClient(data)
@@ -395,9 +398,12 @@ test('reposToClient emits no gitDir and no dropped-candidate path', async () => 
     expect(typeof r.path).toBe('string')
     expect(typeof r.name).toBe('string')
     expect(typeof r.id).toBe('string')
-    // Task 8 (A0): the metadata status is on the wire for every surfaced repo,
-    // and it is one of the closed set — never a caught exception's text.
+    // Task 8 (A0): the metadata fields are on the wire for a readable repo —
+    // metaStatus from the closed set, and branch/uncommittedCount when ok.
     expect(['ok', 'stale', 'unavailable']).toContain(r.metaStatus)
+    expect(r.metaStatus).toBe('ok')
+    expect(r.branch).toBe('main')
+    expect(r.uncommittedCount).toBe(0)
   }
   expect(wire.repos[0]!.path).toBe(real(proj))
   expect(wire.dropped).toEqual([{ id: repoId(real(zero)), name: 'zero', reason: 'invalid' }])
