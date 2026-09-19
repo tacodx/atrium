@@ -103,30 +103,62 @@ corrected shape.
 ```ts
 interface Provider<Cfg, Data> {
   id: string
-  configSchema: ZodSchema<Cfg>
+  configSchema: { parse(x: unknown): Cfg }   // structural duck type — no zod dependency
   detect(): Promise<DetectResult<Cfg>>
-  schedules: Schedule[]                    // NOT a single interval
-  fetch(cfg: Cfg, ctx: FetchCtx): Promise<Data>
+  schedules: Schedule[]                      // NOT a single interval
+  watch?(cfg: Cfg, emit: () => void): Disposable   // push source; the interval is the fallback
+  fetch(cfg: Cfg, ctx: FetchCtx<Data>): Promise<Data>
+  toClient(data: Data): unknown              // REQUIRED redaction seam — see below
   actions: Action[]
 }
 
+interface Disposable { close(): void }
+
 interface Schedule {
-  name: string                             // 'discovery' | 'metadata' | 'poll'
+  name: string                               // 'discovery' | 'metadata' | 'poll'
   intervalMs: number
   runOnStart: boolean
 }
+
+interface FetchCtx<Data = unknown> {
+  schedule: string                           // which schedule triggered this run
+  previous?: Data                            // that schedule's OWN last result, never another's
+  signal: AbortSignal
+}
+
+type DetectResult<Cfg> =
+  | { kind: 'configured'; config: Partial<Cfg> }
+  | { kind: 'candidates'; candidates: Array<{ label: string; config: Partial<Cfg> }> }
+  | { kind: 'nothing-to-detect'; reason?: string }
 
 // Two action kinds, because two of four providers act in-process, not by subprocess.
 type Action =
   | { kind: 'exec'; id: string; label: string; keybinding?: string
       argv(target: unknown): { cmd: string; args: string[] } }   // §8.6
   | { kind: 'call'; id: string; label: string; keybinding?: string
+      payloadSchema?: { parse(x: unknown): unknown }
       run(target: unknown, cfg: unknown): Promise<void> }        // in-process
 ```
 
-Both kinds are declared, both go through the same allowlist and audit log. `exec`
-actions take argv arrays only; `call` actions are static functions, never dynamic
-dispatch on a client-supplied name.
+> **`toClient` is the redaction seam and it is required, not optional.** A provider's
+> `Data` is its own working shape and may hold anything it needs; `toClient` is the one
+> function that decides what leaves the process. It is applied in exactly one place — the
+> scheduler, where the same computed value feeds both the `/api/state` snapshot and the
+> WebSocket push — so there is no second site to keep in sync and no route that can bypass
+> it. Write it as an explicit field-by-field allowlist, never a spread with deletions: a
+> deny-list is correct until the next field is added to `Data`. Status and error values on
+> the wire come from the closed set of declared codes (§7.4: `ok`, `stale`, `unavailable`,
+> `unsupported-shape`); a caught exception object, its `message` or its `stack` never
+> reaches a client. `ctx.previous` and the scheduler's internal return value stay raw —
+> redaction is about the wire, not about the provider's own incremental state.
+
+> Both kinds are declared and both go through the same static allowlist — `dispatch()` looks
+> an action up by id in the provider's own declared array and never indexes a function table
+> by a client-supplied name. `exec` actions take argv arrays only; `call` actions are static
+> functions. **There is no audit log.** Revision 1's text claimed one; nothing in `src/` has
+> ever written one, and the claim is withdrawn here rather than left standing as an unbuilt
+> promise. If one is wanted it belongs at `dispatch()` in `src/core/actions.ts` and deserves
+> its own plan.
 
 One folder per provider: `src/providers/<id>/{index,config,actions}.ts`.
 
