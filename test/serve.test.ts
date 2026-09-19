@@ -398,6 +398,45 @@ test('the same handoff is refused on a second redemption', async () => {
   }
 })
 
+test('a malformed body and an unknown handoff get the same 401, byte for byte', async () => {
+  const scratch = runtimeScratch()
+  let s: Awaited<ReturnType<typeof startServer>> | undefined
+  try {
+    s = await startServer({ port: 7412, env: { XDG_RUNTIME_DIR: scratch } })
+
+    // Not JSON at all: req.json() throws and the route treats it as a miss.
+    const malformed = await fetch('http://127.0.0.1:7412/api/session', {
+      method: 'POST',
+      headers: {
+        host: '127.0.0.1:7412',
+        origin: 'http://127.0.0.1:7412',
+        'content-type': 'application/json',
+      },
+      body: 'not json at all',
+    })
+    // Well-formed, and shaped exactly like a real handoff (43-char base64url),
+    // so nothing but the map lookup can tell it from one.
+    const unknown = await redeem(7412, 'A'.repeat(43))
+
+    expect(malformed.status).toBe(401)
+    expect(unknown.status).toBe(401)
+
+    // Unknown, malformed, expired and already-redeemed are ONE answer, which
+    // the route asserts in a comment and nothing tested. MUTATION: split the
+    // single 401 into two, e.g. replace the `return new Response('unauthorized',
+    // ...)` in the /api/session block with
+    //   typeof handoff === 'string' ? 'unauthorized: unknown-or-expired handoff'
+    //                               : 'unauthorized: malformed'
+    // The status stays 401 either way, so the BODY comparison is the assertion
+    // that does the work here.
+    expect(await malformed.text()).toBe(await unknown.text())
+    expect(malformed.status).toBe(unknown.status)
+  } finally {
+    s?.stop()
+    rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
 test('a GET to /api/session neither issues nor consumes', async () => {
   const scratch = runtimeScratch()
   let s: Awaited<ReturnType<typeof startServer>> | undefined
