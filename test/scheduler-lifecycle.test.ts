@@ -186,7 +186,14 @@ test('a failing fetch is recorded in snapshot(), not swallowed', async () => {
 test('consecutive failures accumulate and a success clears the record', async () => {
   let fail = true
   const payload = { v: 42 }
-  const p = makeFixtureProvider({ fetch: async () => { if (fail) throw new Error('boom'); return payload } })
+  // toClient is an explicit allowlist naming the one field, so the `.data`
+  // assertion below stays a "data arrived" check against the raw payload — the
+  // fixture's default allowlist is over { ok }, and would turn { v: 42 } into
+  // { ok: undefined }. Not identity, not a spread.
+  const p = makeFixtureProvider({
+    fetch: async () => { if (fail) throw new Error('boom'); return payload },
+    toClient: (d) => ({ v: d.v }),
+  })
   const s = schedulerFor(p)
 
   await s.runNow('fx', 'poll').catch(() => {})
@@ -214,7 +221,12 @@ test('onUpdate carries the status envelope, and the record is current when it fi
   // recordSuccess()" and "failure arm does not notify" would ship green.
   let fail = true
   const payload = { v: 42 }
-  const p = makeFixtureProvider({ fetch: async () => { if (fail) throw new Error('boom'); return payload } })
+  // Same allowlist as the test above, for the same reason: `.data` here is a
+  // "data arrived" check, not a redaction check (test/contract.test.ts owns those).
+  const p = makeFixtureProvider({
+    fetch: async () => { if (fail) throw new Error('boom'); return payload },
+    toClient: (d) => ({ v: d.v }),
+  })
   const s = schedulerFor(p)
 
   const seen: Array<[string, ProviderStatus]> = []

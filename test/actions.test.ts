@@ -12,6 +12,7 @@ const provider = (actions: Provider<any, any>['actions']): Provider<any, any> =>
   detect: async () => ({ kind: 'nothing-to-detect' }),
   schedules: [{ name: 'poll', intervalMs: 1000, runOnStart: false }],
   fetch: async () => ({}),
+  toClient: () => ({ wire: true }),   // required by the contract; not identity, on purpose
   actions,
 })
 

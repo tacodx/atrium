@@ -9,6 +9,10 @@ const stub = (id: string, overrides: Partial<Provider<any, any>> = {}): Provider
   detect: async () => ({ kind: 'nothing-to-detect' }),
   schedules: [{ name: 'poll', intervalMs: 1000, runOnStart: false }],
   fetch: async () => ({ ok: true }),
+  // Deliberately NOT identity. An identity default would make the "redaction
+  // above previousByKey" mutation undetectable by every test in this file — the
+  // same trap Task 3 records for `{ parse: x => x }` config stubs.
+  toClient: () => ({ wire: true }),
   actions: [],
   ...overrides,
 })

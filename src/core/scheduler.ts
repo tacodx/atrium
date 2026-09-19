@@ -16,13 +16,13 @@ export interface ScheduleHealth {
 
 /** What snapshot() and an onUpdate listener both see for one provider. */
 export interface ProviderStatus {
-  data?: unknown                              // the provider's most recent Data; absent until the first success
+  data?: unknown                              // the provider's toClient() output (the client value); absent until the first success
   schedules: Record<string, ScheduleHealth>   // schedule name -> that schedule's health
 }
 
 export function createScheduler(registry: Registry, opts: { config: Readonly<Record<string, unknown>> }) {
-  const last = new Map<string, unknown>()          // providerId -> last Data (display value for snapshot()/onUpdate — whichever schedule most recently produced data)
-  const previousByKey = new Map<string, unknown>() // `${providerId}:${scheduleName}` -> that schedule's own last Data (feeds ctx.previous — never another schedule's output)
+  const last = new Map<string, unknown>()          // providerId -> the client value (the toClient() output, never Data) for snapshot()/onUpdate — whichever schedule most recently produced data
+  const previousByKey = new Map<string, unknown>() // `${providerId}:${scheduleName}` -> that schedule's own last RAW Data, unredacted (feeds ctx.previous — never another schedule's output)
   const inflight = new Map<string, Promise<unknown>>()
   const timers: ReturnType<typeof setInterval>[] = []
   const watchers: Disposable[] = []
@@ -197,11 +197,25 @@ export function createScheduler(registry: Registry, opts: { config: Readonly<Rec
         // fetch in flight at teardown mutates state and fires onUpdate after
         // the scheduler was supposedly stopped.
         if (!ac.signal.aborted) {
+          // previousByKey keeps the RAW value: ctx.previous is a provider's own
+          // incremental state, not a client payload. Redacting it here would hand
+          // the next fetch its own censored output — the metadata pass would read a
+          // redacted discovery list and rediscover nothing.
           previousByKey.set(key, data)
-          last.set(providerId, data)
+          // Computed ONCE, deliberately, and stored in exactly one place. `last` is
+          // the single holder of the client value: buildStatus() reads it for both
+          // snapshot() (/api/state) and notify() (the onUpdate payload), so the
+          // object /api/state serves and the object pushed to a WS subscriber are
+          // the same object by construction. A second toClient call anywhere is two
+          // chances for the two wires to disagree.
+          const wire = p.toClient(data)
+          last.set(providerId, wire)
           recordSuccess(providerId, scheduleName)
           notify(providerId)
         }
+        // RAW, on purpose. runNow's resolved value is internal — in-flight
+        // sharing and direct calls from tests — and must NEVER be serialized to a
+        // client. The client value is snapshot()'s.
         return data
       } catch (e) {
         // The SAME abort guard, and it is just as mandatory here: the ordinary

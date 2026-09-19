@@ -38,18 +38,22 @@ afterAll(() => { for (const d of made) rmSync(d, { recursive: true, force: true 
 // test/actions.test.ts, test/contract.test.ts and test/routes.test.ts; read
 // that sentence as four.
 //
-// When `toClient` becomes a required contract member this helper needs one too,
-// and the substantive rule is not merely "add the member": the added `toClient`
+// `toClient` is a required contract member (Task 5), so this helper carries
+// one, and the substantive rule is not merely "have the member": a `toClient`
 // must be an EXPLICIT FIELD-BY-FIELD ALLOWLIST — never identity, never
 // `{ ...d }`. A spread satisfies any "toClient exists" check while shipping
 // every secret the provider holds, and the allowlist shape is the property
-// Task 5's M2 and Task 6's frame tests both depend on.
+// Task 5's M2 and Task 6's frame tests both depend on. The constant below IS
+// that allowlist: the default `fetch` returns `{}`, so the allowlist over this
+// Data names zero fields and exposes none, which is neither identity nor a
+// spread — do not "fix" it into one.
 const provider = (id: string, overrides: Partial<Provider<any, any>> = {}): Provider<any, any> => ({
   id,
   configSchema: { parse: (x: any) => x } as any,
   detect: async () => ({ kind: 'nothing-to-detect' }),
   schedules: [{ name: 'poll', intervalMs: 3_600_000, runOnStart: false }],
   fetch: async () => ({}),
+  toClient: () => ({ wire: true }),
   actions: [],
   ...overrides,
 })

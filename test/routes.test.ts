@@ -11,6 +11,10 @@ const stubProvider = (id: string, actions: Provider<any, any>['actions']): Provi
   detect: async () => ({ kind: 'nothing-to-detect' }),
   schedules: [],
   fetch: async () => ({}),
+  // Never invoked by the tests that pass a plain snapshot into ctx(); it exists
+  // so the literal typechecks, and it is not identity because identity in a
+  // shared fixture is how the next author learns the wrong pattern.
+  toClient: () => ({ wire: true }),
   actions,
 })
 
