@@ -140,25 +140,33 @@ type Action =
       run(target: unknown, cfg: unknown): Promise<void> }        // in-process
 ```
 
-> **`toClient` is the redaction seam and it is required, not optional.** A provider's
-> `Data` is its own working shape and may hold anything it needs; `toClient` is the one
-> function that decides what leaves the process. It is applied in exactly one place — the
-> scheduler, where the same computed value feeds both the `/api/state` snapshot and the
-> WebSocket push — so there is no second site to keep in sync and no route that can bypass
-> it. Write it as an explicit field-by-field allowlist, never a spread with deletions: a
-> deny-list is correct until the next field is added to `Data`. Status and error values on
-> the wire come from the closed set of declared codes (§7.4: `ok`, `stale`, `unavailable`,
-> `unsupported-shape`); a caught exception object, its `message` or its `stack` never
-> reaches a client. `ctx.previous` and the scheduler's internal return value stay raw —
-> redaction is about the wire, not about the provider's own incremental state.
+**`toClient` is the redaction seam and it is required, not optional.** A provider's
+`Data` is its own working shape and may hold anything it needs; `toClient` is the one
+function that decides what leaves the process. It is applied in exactly one place — the
+scheduler, where the same computed value feeds both the `/api/state` snapshot and the
+WebSocket push — so there is no second site to keep in sync and no route that can bypass
+it. Write it as an explicit field-by-field allowlist, never a spread with deletions: a
+deny-list is correct until the next field is added to `Data`. Status and error values in
+the returned object come from the closed set of declared codes (§7.4: `ok`, `stale`, `unavailable`,
+`unsupported-shape`); a caught exception object, its `message` or its `stack` never
+appears in `toClient`'s return value. `ctx.previous` and the scheduler's internal return value stay raw —
+redaction is about the wire, not about the provider's own incremental state.
 
-> Both kinds are declared and both go through the same static allowlist — `dispatch()` looks
-> an action up by id in the provider's own declared array and never indexes a function table
-> by a client-supplied name. `exec` actions take argv arrays only; `call` actions are static
-> functions. **There is no audit log.** Revision 1's text claimed one; nothing in `src/` has
-> ever written one, and the claim is withdrawn here rather than left standing as an unbuilt
-> promise. If one is wanted it belongs at `dispatch()` in `src/core/actions.ts` and deserves
-> its own plan.
+What `toClient` does not cover: `/api/state` serves an envelope per provider,
+`{ data?, schedules }`, and only `.data` is `toClient`'s output. `schedules.<name>.lastErrorMessage`
+is the scheduler's failure record — the thrown exception's `message`, stored by
+`recordFailure` and served and pushed as-is. It is a separate, provider-controlled,
+currently unredacted text channel, so a provider must never throw with `Data`, a path or
+a credential in the message. Sanitizing or closing that channel is an open item (the wire
+task, Task 6, or a plan-level ruling); this section does not claim it is closed.
+
+Both kinds are declared and both go through the same static allowlist — `dispatch()` looks
+an action up by id in the provider's own declared array and never indexes a function table
+by a client-supplied name. `exec` actions take argv arrays only; `call` actions are static
+functions. **There is no audit log.** Revision 1's text claimed one; nothing in `src/` has
+ever written one, and the claim is withdrawn here rather than left standing as an unbuilt
+promise. If one is wanted it belongs at `dispatch()` in `src/core/actions.ts` and deserves
+its own plan.
 
 One folder per provider: `src/providers/<id>/{index,config,actions}.ts`.
 
