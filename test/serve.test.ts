@@ -555,11 +555,15 @@ test('atrium open --print-url prints the boot handoff from the file and does not
     [process.execPath, 'run', 'src/index.ts', 'serve', '--port', '7411'],
     { env, stderr: 'pipe', stdout: 'pipe' },
   )
-  // Hoisted out of the try so the finally can see it. The `before.length`
-  // guard below exists because of exactly that hoist: a variable that is never
-  // assigned makes `not.toContain` vacuously true, which is the shape this
-  // project has been bitten by repeatedly.
+  // Both hoisted out of the try so the assertions AFTER the try/finally can
+  // see them. Nothing is asserted inside the finally, on purpose: a throw
+  // there REPLACES an in-flight exception from the try, so a failed URL
+  // assertion or a waitForFile timeout used to surface as the guard's
+  // `Expected: > 0 / Received: 0` instead of its own message (measured on the
+  // pre-fix shape with waitForFile pointed at a file that never appears). The
+  // finally only kills, waits, captures and removes.
   let before = ''
+  let logs = ''
   try {
     expect(await waitForFile(hp)).toBe(true)
     before = readHandoffFile(scratch).token
@@ -581,19 +585,25 @@ test('atrium open --print-url prints the boot handoff from the file and does not
   } finally {
     proc.kill()
     await proc.exited   // never leave a server squatting machine-global 7411
+    logs = (await new Response(proc.stdout).text()) + (await new Response(proc.stderr).text())
     rmSync(scratch, { recursive: true, force: true })
-
-    // The server process is the ONE place a live handoff exists in memory, and
-    // under systemd its stderr IS the persistent journal. Nothing pinned that
-    // it stays out of either stream — measured, a log of the mint left the
-    // whole suite at 183/0. MUTATION: add
-    // console.log(`atrium: boot handoff ${bootHandoff}`) after the mint in
-    // startServer. The console.error spelling reddens this too, and that is
-    // the one systemd copies into a permanent journal line.
-    const logs = (await new Response(proc.stdout).text()) + (await new Response(proc.stderr).text())
-    expect(before.length).toBeGreaterThan(0)   // the assertion below is vacuous against ''
-    expect(logs).not.toContain(before)
   }
+
+  // NOT a vacuity guard. Measured on bun 1.3.11: `expect('x').not.toContain('')`
+  // THROWS, because every string contains '' — so an unassigned `before` would
+  // not slip through below, it would fail with a message about the empty
+  // string. What this guard does is turn that confusing failure into a plain
+  // "the handoff was never read" one.
+  expect(before.length).toBeGreaterThan(0)
+
+  // The server process is the ONE place a live handoff exists in memory, and
+  // under systemd its stderr IS the persistent journal. Nothing pinned that
+  // it stays out of either stream — measured, a log of the mint left the
+  // whole suite at 183/0. MUTATION: add
+  // console.log(`atrium: boot handoff ${bootHandoff}`) after the mint in
+  // startServer. The console.error spelling reddens this too, and that is
+  // the one systemd copies into a permanent journal line.
+  expect(logs).not.toContain(before)
 })
 
 // Three mutations, one per assertion group in this test, all run RED then
