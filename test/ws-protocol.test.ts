@@ -240,12 +240,17 @@ test('closing one authenticated socket leaves the other subscribed and still rec
     const token = await openSession(port, scratch)
     a = await authedSocket(port, token)
     b = await authedSocket(port, token)
-    // MUTATION M7: replace the two server.publish calls with a loop over a
-    // module-scope, never-pruned Set of sockets — subscriberCount is 0 at both
-    // checkpoints. Bun's own close handling is what prunes the subscription,
-    // so this pins topic routing over a hand-rolled socket set. (A "does not
-    // throw" assertion would be vacuous: ws.send on a closed socket and
-    // server.publish after stop() both return 0 without throwing.)
+    // MUTATION M7, the REALISABLE form: replace the two server.publish calls
+    // with a loop over a module-scope, never-pruned Set of sockets AND
+    // replace `ws.subscribe(STATE_TOPIC)` in the auth branch with
+    // `live.add(ws)`. Only then is subscriberCount 0 at both checkpoints.
+    // The plan's literal text replaces the publishes ONLY, keeping the
+    // subscribe, so it leaves this test green and reddens Test 4 alone
+    // (measured; the addendum's M7 row). Bun's own close handling is what
+    // prunes the subscription, so this pins topic routing over a hand-rolled
+    // socket set. (A "does not throw" assertion would be vacuous: ws.send on
+    // a closed socket and server.publish after stop() both return 0 without
+    // throwing.)
     expect(s.subscriberCount(STATE_TOPIC)).toBe(2)
 
     a.sock.close()
@@ -405,11 +410,17 @@ test('a run still in flight when stop() is called publishes nothing to a socket 
     a = await authedSocket(port, token)
     const drained = a.frames.length
 
-    // The teardown-ordering pin. Task 2's shutdown is `scheduler.stop();
+    // What this pins is that `scheduler.stop()` runs on the stop path AT ALL,
+    // not that it runs first. Task 2's shutdown is `scheduler.stop();
     // cleanup()` and this task's onUpdate -> publish wire is what makes it
     // observable: the run's post-await abort guard is the only thing
-    // suppressing a publish after the server has gone. MUTATION M22: call
-    // originalStop() before scheduler.stop() in the server.stop wrapper.
+    // suppressing a publish after the server has gone. MUTATION M22, the
+    // REALISABLE form: `const shutdown = () => { cleanup() }`, with
+    // scheduler.stop() deleted — four red, this test among them (measured;
+    // the addendum's M22 row). The plan's literal text — originalStop()
+    // before scheduler.stop() in the wrapper — reddens nothing, and no test
+    // could make it: both calls are synchronous and land in the same tick, so
+    // nothing resumes between them and the ORDER is unobservable.
     fixture.emit()                      // starts the ~50ms run
     await Bun.sleep(10)
     s.stop()
