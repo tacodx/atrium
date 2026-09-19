@@ -2529,6 +2529,83 @@ that. It now reads "the provider's toClient() output (the client value); absent 
 **Counts.** 184 → 187 tests (+3), 449 → 465 expect() (+16: 7 in the sentinel test, 6 in the missing-toClient
 test, 3 in the routes test). Full suite run twice at exit, identical.
 
+##### Task 5 fix round — two rows added, one row re-measured, and a claim withdrawn
+
+> Same discipline as above: every runtime row run RED on the full suite by exact-once replacement on
+> `9075f82` plus the fix-round commits, reverted with `git checkout`, re-run GREEN. Baseline 187 / 0 / 465;
+> exit **187 / 0 / 466** (+1 expect(), the T1 length pin). Every mutant below typechecks except where the
+> row says otherwise.
+
+| # | The mutation | Measured RED | Notes |
+|---|---|---|---|
+| M7 | catch-arm `notify(providerId)` removed (the success-arm occurrence is left; in the catch arm the target is `recordFailure(providerId, scheduleName, e)` + newline + `notify(providerId)`, which is unique) | **185 / 2 / 456** — `a provider with no toClient fails the run instead of publishing raw Data` at the new `expect(pushed).toHaveLength(1)` (`Expected length: 1 / Received length: 0`), and `onUpdate carries the status envelope, and the record is current when it fires` (test/scheduler-lifecycle.test.ts:236, `expect(seen.length).toBe(1)`, `Expected: 1 / Received: 0`). Mutant typechecks | **Before the pin, the same mutant was 186 / 1 / 458 — the no-toClient test stayed GREEN.** `pushed.every(...)` is vacuously true on `[]`; the length line is what makes the "nothing carrying Data reached either wire" claim about a real envelope. Task 10: two named tests red, not one |
+| M8 | runNow's `return data` → `return p.toClient(data)` | **186 / 1 / 466** — ONLY `the client value is the redacted one …` at `expect((raw as any).token).toBe(SENTINEL)` (`Expected: "atrium-redaction-sentinel-9f2c41" / Received: undefined`). Mutant typechecks | The review's spelling `return data` → `return wire` is **not a runnable mutant**: `wire` is `const` inside the `if (!ac.signal.aborted)` block, so it is `src/core/scheduler.ts(219,16): error TS2304: Cannot find name 'wire'` under typecheck and a `ReferenceError: wire is not defined` at runtime that reddens **15** tests (172 / 15 / 423) — every test with a successful run, across contract, routes, scheduler-lifecycle and config. Task 10 runs the `p.toClient(data)` form |
+| M6-routes | `toClient` deleted from the `/api/state` test's inline literal, now `satisfies Provider<any, any>` | `bun run typecheck` exit 2, verbatim: `test/routes.test.ts(128,21): error TS2345: Argument of type '{ id: string; … actions: never[]; }' is not assignable to parameter of type 'Provider<any, any>'.` + `test/routes.test.ts(135,5): error TS1360: Type '{ … }' does not satisfy the expected type 'Provider<any, any>'.`, each elaborated `Property 'toClient' is missing in type '{ … }' but required in type 'Provider<any, any>'.` Restored → exit 0 | **Not TS2741**, which the fix brief predicted: in argument position the missing member surfaces as TS2345 at the call and TS1360 at the `satisfies`, with the TS2741 wording as the elaboration line. Task 10 must not grep for TS2741 here either (see the M6 row) |
+
+**The `as` claim, withdrawn.** The review (L1-2/L3-7) said a type assertion "checks comparability, so
+that literal MINUS toClient would still compile". Measured on this tree, with the plan's own `as
+Provider<any, any>` (plan ~2202 wrote `as`; T5 kept it) and `toClient` deleted: **exit 2**,
+`test/routes.test.ts(122,21): error TS2352: Conversion of type '{ … }' to type 'Provider<any, any>' may be
+a mistake because neither type sufficiently overlaps with the other`, elaborated `Property 'toClient' is
+missing`. Widening `actions: []` to `Provider<any, any>['actions']`, or `detect` to `Promise<any>`, or
+`schedules` to `Provider<any, any>['schedules']`, or all three (four variants, scratch file, same tsc
+flags) — still TS2352 with the same elaboration. So the cast was NOT silent on this literal. The
+`satisfies` change stands on the narrower ground the test comment now states: a cast is the one spelling
+a later edit silences with `as unknown as Provider<any, any>` (tsc's own suggestion text), and it reads
+as a conversion rather than a check. The plan's sketch line at ~2202 still says `as`; read it as `satisfies`.
+
+**R1 — the exception-text claim was false, and is now scoped (text, not measurable).** T5's contract JSDoc
+and spec §6 both said "a caught exception object, its `message` or its `stack` never reaches a client".
+The review's probe P7 showed the opposite on this tree: a `fetch` that throws `new Error('ENOENT
+/home/someone/.secret ' + SENTINEL)` puts that string in the `/api/state` body under
+`schedules.poll.lastErrorMessage` and in every onUpdate envelope — on `9075f82` line numbers, `recordFailure` (scheduler.ts:123)
+stores `(err as Error)?.message ?? String(err)`, `buildStatus` (:140) copies it into the envelope, the
+watch-install catch (:281) writes `watch() threw: ${e.message}`, routes.ts:66 serializes the snapshot.
+That is Task 2's failure-record design, pinned as a feature by scheduler-lifecycle :176/:240/:289 and
+rendered by Task 9. **Nothing in the channel was changed this round** — `recordFailure` is byte-identical.
+What changed is the two claims: the closed-set rule now governs `toClient`'s RETURN VALUE; the JSDoc
+and §6 both name `schedules.<name>.lastErrorMessage` as a separate, provider-controlled, currently
+unredacted text channel `toClient` never sees, tell providers never to throw with `Data`, a path or a
+credential in the message, and mark sanitizing/closing it as an **open item with no owner yet** —
+Task 6 (the wire) or a plan-level ruling: sanitize at `recordFailure`, or a closed-set code on the wire
+with the message kept server-side. The JSDoc also (L3-3) says `/api/state` serves the `{ data?, schedules }`
+envelope and only `.data` is `toClient`'s output, (L3-4) calls the allowlist and closed-set rules
+conventions held by each provider's redaction test, not checks — `unknown` accepts identity and spreads,
+nothing inspects the shape at registration or the call site, the compile-time guarantee is exactly that
+the member exists — and (L3-5) states §7.4's four-way status as the pattern, not the universal set.
+
+**R2 — buildStatus's isolation comment (text, not measurable).** "freshly allocated — never the live
+record objects" held for `schedules[name]` (copied at :140) and not for `.data` (:142 hands out the stored
+object; the review's P4: a listener doing `(st.data as any).injected = 'x'` changes the next `/api/state`
+body). That aliasing is deliberate and is the M4 oracle (`toBe` in contract.test.ts). The comment now says
+exactly that: records copied, `.data` shared by design, consumers treat it as read-only. No behaviour changed.
+
+**T4 — the spec's two §6 paragraphs (text, not measurable).** The part-2 and part-3 blocks landed as
+blockquotes because the plan's text carried a leading `> ` (the plan quoting its own insertion); they were
+the only `> ` lines in the spec. Both are plain paragraphs now; part 3 is byte-identical to the unquoted
+original and part 2 differs only by the R1 correction ("on the wire" → "in the returned object"; "never
+reaches a client" → "never appears in `toClient`'s return value") plus the new channel paragraph.
+
+**Carried forward from the T5 review, not fixed here (owners named):**
+
+- **`lastErrorMessage` channel** (R1 above) — needs an owner: Task 6 or a plan ruling. Sanitize at
+  `recordFailure`, or a closed-set code + server-side message.
+- **L3-2** — `src/server/routes.ts:81` (POST `/api/actions` 400) serializes `e.message` from
+  provider-authored `payloadSchema.parse` / `argv` / `run`; the ":78-80 echoes only the ids" comment is true
+  only for the two lookup errors. routes.ts was forbidden this round; Task 6 owns the server.
+- **L2-2** — a circular `toClient` value makes `handleRoute` reject (`JSON.stringify cannot serialize
+  cyclic structures`) and `/api/state` stays broken until the next successful run; production would answer
+  500 via Bun.serve's `error` hook (inferred, not measured). Task 6 owns serialization failure; the fixture's
+  `setWire(circular)` exists for it.
+- **L2-4** — "exactly one call site" is held by grep, not a test: a no-effect second `p.toClient` call is
+  invisible (P1b, P6 both green). Task 10's verify gate should carry `grep -n 'p.toClient' src/` = 1.
+- **L2-5** — `toClient` returning `undefined` yields an envelope with an explicit `data: undefined` key
+  that JSON drops; on the wire indistinguishable from "never succeeded" except via `lastSuccessAt`. Task 9 note.
+- **L3-8** — a JS provider (or an `as any` registration) that forgot `toClient` registers fine, fails EVERY
+  run with `lastErrorMessage: 'p.toClient is not a function'` and polls forever; nothing raw is published.
+  A registry-time `typeof` check is out of scope by the plan. Recorded as the ruling.
+- L1-3 is M8 above (fixed). L1-2/L3-7 is M6-routes above (fixed, with the `as` claim withdrawn).
+
 ---
 
 **Out of scope for this task:**
