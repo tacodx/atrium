@@ -10,7 +10,12 @@
 
 /** Bun pub/sub topic every authenticated socket joins. Zero-state invariant §8.4. */
 export const STATE_TOPIC = 'state'
-/** Per-provider narrowing topic. Provider ids match [A-Za-z0-9_-]+, so this never collides with STATE_TOPIC. */
+/**
+ * Per-provider narrowing topic. It can never collide with STATE_TOPIC by construction, not by
+ * any constraint on the id: providerTopic always prefixes `state:`, and `state:<anything>` is
+ * never the string `state`. registry.register() enforces no id charset at all — ids are
+ * unconstrained there — so nothing else would hold this.
+ */
 export function providerTopic(providerId: string): string { return `${STATE_TOPIC}:${providerId}` }
 
 export const WS_PATH = '/ws'
