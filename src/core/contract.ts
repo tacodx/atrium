@@ -44,9 +44,13 @@ export interface Provider<Cfg, Data> {
   watch?(cfg: Cfg, emit: () => void): Disposable
   fetch(cfg: Cfg, ctx: FetchCtx<Data>): Promise<Data>
   /**
-   * The redaction seam, and the only thing that decides what leaves this
-   * process. Everything `/api/state` serves and every WS frame the scheduler
-   * pushes is the return value of this function — never `Data` itself.
+   * The redaction seam. `/api/state` serves one envelope per provider,
+   * `{ data?, schedules }` (`ProviderStatus` in src/core/scheduler.ts), and
+   * the `.data` member of that envelope — the same `.data` an onUpdate
+   * listener receives — is the return value of this function, never `Data`
+   * itself. The scheduler applies it once per successful run and stores the
+   * result in one place. `schedules` is the scheduler's own record and is not
+   * this function's output; see the last paragraph.
    *
    * REQUIRED, not optional, for the same reason `DispatchOptions.cfg` is
    * required (src/core/actions.ts, where it records that it was hardcoded
@@ -59,12 +63,30 @@ export interface Provider<Cfg, Data> {
    * deletions: a deny-list is correct exactly until the next field is added to
    * `Data`, and then it silently is not, with no diff to review.
    *
-   * Closed set on the wire: any status or error value in the returned object
-   * is one of the declared codes — `ok`, `stale`, `unavailable`,
-   * `unsupported-shape` (spec §7.4) — plus their declared operands. Never a
-   * caught exception object and never its text: no `e.message`, no `e.stack`,
-   * no `String(e)`. Exception text carries absolute paths, argv and
-   * occasionally credentials, and the client has no use for any of it.
+   * Closed set in the RETURN VALUE: any status or error value in the object
+   * this returns is one of a small set of codes the provider declares, plus
+   * their declared operands. §7.4's four-way `ok` / `stale` / `unavailable` /
+   * `unsupported-shape` is the model, not a universal enum. Never a caught
+   * exception object and never its text: no `e.message`, no `e.stack`, no
+   * `String(e)`. Exception text carries absolute paths, argv and occasionally
+   * credentials, and the client has no use for any of it.
+   *
+   * Both rules are CONVENTIONS, held by each provider's own redaction test and
+   * by review — not checks. The return type is `unknown`, so identity and
+   * `{ ...data }` both typecheck, and nothing at registration or at the call
+   * site inspects the shape. The compile-time guarantee is exactly that the
+   * member exists.
+   *
+   * What this seam does NOT cover: the scheduler's failure record. When
+   * `fetch` throws (or `watch` throws on installation), `recordFailure` in
+   * src/core/scheduler.ts stores the exception's `message` as
+   * `schedules.<name>.lastErrorMessage`, and that string is served by
+   * `/api/state` and carried in every onUpdate envelope as-is. It is a
+   * separate, provider-controlled, currently unredacted text channel that
+   * `toClient` never sees, so a provider must never throw with `Data`, a path
+   * or a credential in the message. Sanitizing or closing that channel is an
+   * open item for the wire task (Task 6) or a plan-level ruling; this seam
+   * does not claim it.
    */
   toClient(data: Data): unknown
   actions: Action[]
