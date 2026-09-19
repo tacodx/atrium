@@ -29,10 +29,19 @@ const real = (p: string) => realpathSync(p)
 test('parse(undefined) returns the full default config, not undefined', () => {
   const a = reposConfigSchema.parse(undefined)
   const b = reposConfigSchema.parse(undefined)
-  expect(a).toEqual({ staleDays: 30, extraRoots: [], includeDotPaths: false, treatAsContainer: [] })
+  expect(a).toEqual({
+    staleDays: 30, extraRoots: [], includeDotPaths: false, treatAsContainer: [],
+    // Task 8's five keys at their declared defaults (plan step A0).
+    metadataConcurrency: 8,
+    metadataTimeoutMs: 5000,
+    editor: { cmd: 'code', args: ['--', '${path}'] },
+    terminal: { cmd: 'konsole', args: ['--separate', '--workdir', '${path}'] },
+    claudeTerminal: { cmd: 'konsole', args: ['--separate', '--workdir', '${path}', '-e', 'claude'] },
+  })
   expect(b).toEqual(a)
   expect(a).not.toBe(b)
   expect(a.extraRoots).not.toBe(b.extraRoots)
+  expect(a.editor.args).not.toBe(b.editor.args)
 })
 
 test('parse rejects an unknown key by name', () => {
@@ -386,6 +395,9 @@ test('reposToClient emits no gitDir and no dropped-candidate path', async () => 
     expect(typeof r.path).toBe('string')
     expect(typeof r.name).toBe('string')
     expect(typeof r.id).toBe('string')
+    // Task 8 (A0): the metadata status is on the wire for every surfaced repo,
+    // and it is one of the closed set — never a caught exception's text.
+    expect(['ok', 'stale', 'unavailable']).toContain(r.metaStatus)
   }
   expect(wire.repos[0]!.path).toBe(real(proj))
   expect(wire.dropped).toEqual([{ id: repoId(real(zero)), name: 'zero', reason: 'invalid' }])

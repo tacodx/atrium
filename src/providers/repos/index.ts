@@ -30,6 +30,8 @@ export type DropReason = 'worktree' | 'submodule' | 'vendored' | 'ambiguous' | '
  */
 export type ReposErrorCode = 'root-missing' | 'root-unreadable' | 'candidate-error'
 
+export type RepoMetaStatus = 'ok' | 'stale' | 'unavailable'
+
 /** `path` and `gitDir` are absolute and realpath-resolved; `name` is `basename(path)`. */
 export interface RepoEntry {
   id: string
@@ -38,6 +40,13 @@ export interface RepoEntry {
   gitDir: string
   bare: boolean
   origin: 'top-level' | 'container-child'
+  /**
+   * A repo that discovery has surfaced but the metadata pass has not yet read
+   * is `unavailable` with no `metaReason`: there is nothing to show, and the
+   * reason set is closed (no "pending" code). The first metadata cycle
+   * replaces it.
+   */
+  metaStatus: RepoMetaStatus
 }
 
 export interface DroppedCandidate { id: string; path: string; name: string; reason: DropReason }
@@ -387,6 +396,7 @@ async function discover(cfg: ReposConfig, deps: Required<ReposProviderDeps>, sig
       gitDir: entry.gitDir,
       bare: entry.bare,
       origin: c.origin,
+      metaStatus: 'unavailable',
     })
   })
 
@@ -400,7 +410,10 @@ async function discover(cfg: ReposConfig, deps: Required<ReposProviderDeps>, sig
  * The wire types. Task 8 EXTENDS `RepoWire` with its metadata fields and
  * extends the allowlist to match; Task 9 imports both interfaces type-only.
  */
-export interface RepoWire { id: string; path: string; name: string; bare: boolean; origin: 'top-level' | 'container-child' }
+export interface RepoWire {
+  id: string; path: string; name: string; bare: boolean; origin: 'top-level' | 'container-child'
+  metaStatus: RepoMetaStatus
+}
 export interface DroppedWire { id: string; name: string; reason: DropReason }
 export interface ReposWire {
   repos: RepoWire[]
@@ -427,7 +440,7 @@ export interface ReposWire {
  */
 export function reposToClient(data: ReposData): ReposWire {
   return {
-    repos: data.repos.map((r) => ({ id: r.id, path: r.path, name: r.name, bare: r.bare, origin: r.origin })),
+    repos: data.repos.map((r) => ({ id: r.id, path: r.path, name: r.name, bare: r.bare, origin: r.origin, metaStatus: r.metaStatus })),
     dropped: data.dropped.map((d) => ({ id: d.id, name: d.name, reason: d.reason })),
     errors: [...data.errors],
     scannedAt: data.scannedAt,
