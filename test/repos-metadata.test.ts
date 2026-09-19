@@ -120,6 +120,42 @@ test('a mid-rebase repo on the apply backend recovers head-name too', async () =
   expect(r.rebaseProgress).toEqual({ current: 1, total: 1 })
 })
 
+// F2 (L2-F2): the head-name state file is read with a trim, which strips the
+// ENDS only — a head-name carrying a second line would otherwise reach the
+// wire as a two-line branch name, and anything downstream that renders a
+// branch inline would render the injected line with it.
+// MUTATION: drop the first-line split in resolveBranch → RED here.
+test('a multi-line rebase head-name yields only its first line as the branch', async () => {
+  const root = makeScanRoot()
+  const repo = makeRepoIn(root, 'rbx')
+  startBranchRebaseConflict(repo, 'feature', 'merge')
+  // What a hostile — or merely corrupt — repository can put in that file.
+  writeFileSync(join(repo, '.git', 'rebase-merge', 'head-name'), 'refs/heads/evil\nSECOND-LINE\n')
+  const { p, data } = await readRoot(root)
+  const r = byName(data, 'rbx')
+  expect(r.repoState).toBe('rebasing')
+  expect(r.branch).toBe('evil')
+  expect(JSON.stringify(p.toClient(data))).not.toContain('SECOND-LINE')
+})
+
+// F2: the stated never-'(detached)'-and-never-'' invariant holds on the
+// rebasing path too, not only on the plain one.
+test('a rebase head-name that is (detached) or empty leaves branch absent', async () => {
+  const root = makeScanRoot()
+  const det = makeRepoIn(root, 'rbd')
+  startBranchRebaseConflict(det, 'feature', 'merge')
+  writeFileSync(join(det, '.git', 'rebase-merge', 'head-name'), 'refs/heads/(detached)\n')
+  const empty = makeRepoIn(root, 'rbe')
+  startBranchRebaseConflict(empty, 'feature', 'merge')
+  writeFileSync(join(empty, '.git', 'rebase-merge', 'head-name'), 'refs/heads/\n')
+  const { data } = await readRoot(root)
+  for (const name of ['rbd', 'rbe']) {
+    const r = byName(data, name)
+    expect(r.repoState).toBe('rebasing')
+    expect(r.branch).toBeUndefined()
+  }
+})
+
 test('a mid-merge repo reports "merging" and keeps its branch', async () => {
   const root = makeScanRoot()
   startMergeConflict(makeRepoIn(root, 'mg'))

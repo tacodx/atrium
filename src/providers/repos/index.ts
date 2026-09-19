@@ -510,7 +510,16 @@ function resolveBranch(gitDir: string, state: RepoState, parsed: StatusV2): Pick
     const isMerge = safeExists(merge)
     const dir = isMerge ? merge : join(gitDir, 'rebase-apply')
     const head = readTrimmed(join(dir, 'head-name'))
-    const branch = head !== undefined && head.startsWith('refs/heads/') ? head.slice('refs/heads/'.length) : undefined
+    // readTrimmed strips the ENDS only, so a head-name of
+    // `refs/heads/evil\nSECOND\n` would otherwise put the two-line string
+    // `evil\nSECOND` on the wire as a branch name. Take the FIRST line only,
+    // and treat '(detached)' or an empty name as NO branch — which is also
+    // what makes this function's stated never-'(detached)', never-'' promise
+    // true on the rebasing path, not just on the plain one.
+    const named = head !== undefined && head.startsWith('refs/heads/')
+      ? (head.slice('refs/heads/'.length).split('\n')[0] ?? '')
+      : ''
+    const branch = named === '' || named === '(detached)' ? undefined : named
     const current = readInt(join(dir, isMerge ? 'msgnum' : 'next'))
     const total = readInt(join(dir, isMerge ? 'end' : 'last'))
     const rebaseProgress = current !== undefined && total !== undefined ? { current, total } : undefined
