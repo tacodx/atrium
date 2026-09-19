@@ -712,8 +712,16 @@ export function createReposProvider(deps: ReposProviderDeps = {}): Provider<Repo
     //    `# branch.oid (initial)`.
     const lg = await runGit(entry.path, ['log', '-1', '--format=%ct'], { timeoutMs })
     if (lg.timedOut) { onTimeout(entry); return }
-    const ct = Number(lg.stdout.trim())
-    const lastCommitAt = isCodeZero(lg.code) && Number.isFinite(ct) ? ct : undefined
+    // `Number('')` is 0, so an exit-0 log with EMPTY stdout would store
+    // lastCommitAt = 0 — a real-looking 1970 timestamp — where the honest
+    // answer is "unknown". No mutation is recorded for this row and none can
+    // be: with the 2.55 binary measured here, `-1 --format=%ct` either prints
+    // a timestamp or exits 128, so the shape is unreachable and no test can
+    // observe it. The guard stands against a future format change, not
+    // against today's behaviour.
+    const out = lg.stdout.trim()
+    const ct = Number(out)
+    const lastCommitAt = out !== '' && isCodeZero(lg.code) && Number.isFinite(ct) ? ct : undefined
 
     // 5. Assign.
     const parsed = parseStatusV2(st.stdout)
