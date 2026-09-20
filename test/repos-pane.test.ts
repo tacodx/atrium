@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { createElement } from 'react'
+import { createElement, isValidElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, realpathSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
@@ -100,6 +100,59 @@ function readyFrom(wire: ReposWire): ReadyState {
 
 function render(state: ReposPaneState): string {
   return renderToStaticMarkup(createElement(ReposPane, { state, nowMs: NOW_MS, onAction: () => {} }))
+}
+
+// --- The action-button walk ---------------------------------------------------
+//
+// No DOM library and no new dependency. `ReposPane` and `RepoGroup` are pure
+// function components with no hooks, so calling `node.type(node.props)` IS the
+// whole render, and the tree it returns still carries the real onClick
+// closures. Walking it is therefore a genuine click on every action button —
+// which renderToStaticMarkup structurally cannot give, because it throws the
+// handlers away and keeps only the attributes.
+
+type AnyProps = Record<string, unknown>
+
+interface ActionButton {
+  /** `data-repo` of the enclosing row, inherited down the walk. */
+  repoPath: string | undefined
+  actionId: string
+  click: () => void
+}
+
+function collectActionButtons(node: unknown, repoPath: string | undefined, out: ActionButton[]): void {
+  if (Array.isArray(node)) {
+    for (const child of node) collectActionButtons(child, repoPath, out)
+    return
+  }
+  // Bound to a local first: a type predicate narrows a REFERENCE, never a cast
+  // expression, so inlining the assertion leaves `node` unknown under tsc.
+  const candidate = node as {} | null | undefined
+  if (!isValidElement<AnyProps>(candidate)) return
+  const props = candidate.props
+  if (typeof candidate.type === 'function') {
+    collectActionButtons((candidate.type as (p: AnyProps) => unknown)(props), repoPath, out)
+    return
+  }
+  // A Fragment's type is a symbol: it carries no data-repo and no data-action,
+  // so it falls through to the children walk below, which is correct.
+  const rowPath = typeof props['data-repo'] === 'string' ? props['data-repo'] : repoPath
+  const actionId = props['data-action']
+  if (typeof actionId === 'string') {
+    const onClick = props['onClick']
+    if (typeof onClick !== 'function') throw new Error(`data-action="${actionId}" carries no onClick`)
+    out.push({ repoPath: rowPath, actionId, click: onClick as () => void })
+  }
+  collectActionButtons(props['children'], rowPath, out)
+}
+
+function actionButtonsOf(
+  state: ReposPaneState,
+  onAction: (actionId: string, path: string) => void,
+): ActionButton[] {
+  const out: ActionButton[] = []
+  collectActionButtons(createElement(ReposPane, { state, nowMs: NOW_MS, onAction }), undefined, out)
+  return out
 }
 
 // --- Derivation cases ---------------------------------------------------------
@@ -248,18 +301,36 @@ test('actions are POST buttons, never links or forms', () => {
 })
 
 test('clicking an action reports the action id and the repo path', () => {
-  const html = render(readyFrom(READY_WIRE))
-  const start = html.indexOf('<li data-repo="/fixtures/bravo"')
-  expect(start).toBeGreaterThan(-1)
-  const row = html.slice(start, html.indexOf('</li>', start))
-  // The three buttons live INSIDE bravo's own row, so the path the handler
-  // closes over is bravo's.
-  expect(row).toContain('data-action="open-editor"')
-  expect(row).toContain('data-action="open-terminal"')
-  expect(row).toContain('data-action="open-claude"')
+  const state = readyFrom(READY_WIRE)
+  const reported: [string, string][] = []
+  const buttons = actionButtonsOf(state, (actionId, path) => {
+    reported.push([actionId, path])
+  })
 
-  // No DOM library is added to synthesize a click. Instead: the handler
-  // main.tsx passes exists, and main.tsx really passes it.
+  // Derived from the state, not hardcoded: every surfaced row in BOTH groups
+  // must contribute its three handlers, so a group the walk never reaches
+  // shows up here rather than passing silently.
+  const rows = state.needsAttention.length + state.recent.length
+  expect(buttons.length).toBe(rows * 3)
+
+  const bravo = buttons.filter((b) => b.repoPath === '/fixtures/bravo')
+  expect(bravo.length).toBe(3)
+  for (const b of bravo) b.click()
+
+  // A WHOLE-ARRAY equality on what the handler actually reports: the action id
+  // first, the ABSOLUTE PATH second. `resolveTarget`
+  // (src/providers/repos/actions.ts) validates an action target by exact string
+  // equality against a table keyed on absolute realpath, so reporting
+  // `repo.name` (M14) 400s all of them server-side, and swapping the pair (M15)
+  // does the same — with the error discarded on both sides, which is why this
+  // has to be asserted here rather than left to the server.
+  expect(reported).toEqual([
+    ['open-editor', '/fixtures/bravo'],
+    ['open-terminal', '/fixtures/bravo'],
+    ['open-claude', '/fixtures/bravo'],
+  ])
+
+  // The wiring, kept from the test this replaces.
   expect(typeof postReposAction).toBe('function')
   expect(readFileSync(join(ROOT, 'web/src/main.tsx'), 'utf8')).toContain('onAction={postReposAction}')
 })
