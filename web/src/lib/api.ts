@@ -62,9 +62,33 @@ export async function postAction(
  * No second fetch implementation: this delegates to postAction above. With no
  * stored token it resolves without a fetch — there is nothing to authenticate
  * with, and the request could only ever 401.
+ *
+ * Two silences, both closed here rather than left to a later reader:
+ *
+ *  1. `localStorage.getItem` THROWS `SecurityError` when site data is blocked.
+ *     `onClick` discards this promise, so an exception escaping here surfaces
+ *     only as an `unhandledrejection` — a blocked-storage browser would see
+ *     every button do nothing, with the cause nowhere near the button. The
+ *     try/catch turns that into the same no-op as an absent token.
+ *  2. `postAction`'s `{ ok:false, error }` was dropped. A 400
+ *     `unknown repository target` from the provider's `resolveTarget` — the one
+ *     control that makes putting absolute paths on the wire safe — was
+ *     therefore invisible in the pane, and src/server/serve.ts logs no requests
+ *     at all, so a rejected action produced no evidence ANYWHERE. Ruling E
+ *     covers the launcher no-op, not this. The console is the only surface this
+ *     signature can reach: `onAction` is typed `void` and the pane holds no
+ *     error channel, which is Lens B's M-5/M-6 and belongs to Task 10.
+ *
+ * The `Promise<void>` signature is pinned by the plan and is unchanged.
  */
 export async function postReposAction(actionId: string, path: string): Promise<void> {
-  const token = localStorage.getItem(TOKEN_STORAGE_KEY)
+  let token: string | null = null
+  try {
+    token = localStorage.getItem(TOKEN_STORAGE_KEY)
+  } catch {
+    return
+  }
   if (token === null) return
-  await postAction(token, 'repos', actionId, { path })
+  const r = await postAction(token, 'repos', actionId, { path })
+  if (!r.ok) console.error(`atrium: action ${actionId} was rejected (${r.error})`)
 }

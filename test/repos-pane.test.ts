@@ -363,6 +363,32 @@ test('the pane source contains no injection sink and no value import from src/',
   for (const line of fromServerTree) expect(line.startsWith('import type')).toBe(true)
 })
 
+test('the action POST carries the token in a header and the path in a body, never in a URL', () => {
+  const src = readFileSync(join(ROOT, 'web/src/lib/api.ts'), 'utf8')
+
+  // The token reaches postAction, the provider id is the LITERAL 'repos'
+  // (Ruling A), and the target is `{ path }` — the shape resolveTarget reads.
+  expect(src).toContain("postAction(token, 'repos', actionId, { path })")
+  expect(src).toContain('authorization: `Bearer ${token}`')
+
+  // SS8.3: the token travels in the Authorization header and NEVER in a URL.
+  // This is a source grep because nothing else in the repo can observe it — the
+  // pane offers no injection seam, and bun defines no `localStorage`, so a
+  // behavioural test would have to install that global AND stub fetch. Without
+  // these two lines a later move of the token into a query string ships fully
+  // green, reopening SS8.3; M17 is exactly that move.
+  expect(src).not.toMatch(/token=/)
+  expect(src).not.toMatch(/`\/api\/[^`]*\$\{token\}/)
+
+  // The two silences: a throwing localStorage (SecurityError when site data is
+  // blocked) is a no-op rather than an unhandledrejection, and postAction's
+  // { ok:false, error } — a 400 `unknown repository target` from resolveTarget
+  // — is reported rather than dropped. The console is the only surface the
+  // pinned `void` signature can reach; a pane-level error channel is T10's.
+  expect(src).toMatch(/catch\s*{\s*return\s*}/)
+  expect(src).toContain('if (!r.ok) console.error(')
+})
+
 // --- End-to-end smoke ---------------------------------------------------------
 
 test('the assembled server serves the fixture repos over an authenticated /api/state', async () => {
