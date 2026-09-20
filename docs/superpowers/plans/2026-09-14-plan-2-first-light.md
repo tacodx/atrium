@@ -5873,3 +5873,102 @@ comments in `index.ts` — the scan reads raw text, comments included, so no sou
    at the end of this round. `test/repos-metadata.test.ts` and the Task 7 discovery suite drain their
    own via `cleanupFixtures`; the leak is `test/rungit.test.ts` and `test/actions.test.ts`, which
    were explicitly out of scope for T7 and T8 (carry-forward P3). **Task 10 hygiene.**
+
+#### Task 9 addendum — the fix round's mutation rows, the test renumbering, and the `$HOME` hermeticity regression
+
+> **Created in the fix round, because Task 9 shipped no addendum.** Nothing in the tracked plan
+> carried any of this. Recorded HERE for the same reason Tasks 3–8's were: **Task 10 re-runs this
+> whole mutation table**, `.superpowers/sdd/` is gitignored, and a row that cannot redden its named
+> test reads as a regression when Task 10 runs it.
+>
+> Every row below was run **one at a time on a clean tree**, by exact-string replacement that refuses
+> to apply unless the target occurs exactly once, then reverted with `git checkout` with
+> `git status --porcelain` verified empty and re-run green. File baseline
+> `bun test test/repos-pane.test.ts` = **21 pass / 0 fail**; full suite **287 pass / 0 fail / 907
+> expect() across 18 files** (was 285 / 0 / 890). `bun run typecheck` exit 0 at every commit.
+
+**Rows M1–M13 are Task 9's own and are in the task-9 report, unchanged by this round.** M14–M21 are
+new, and four of them exist because a test that could not fail was believed: the task's only
+interactive feature had no behavioural coverage at all, and the value-import tripwire had a reachable
+bypass — this project's 17th vacuity instance, and the first found *inside a tripwire* rather than
+inside coverage.
+
+| # | Edit | Named test | OBSERVED red | Revert |
+|---|---|---|---|---|
+| M14 | `props.onAction(actionId, repo.path)` → `repo.name` | 17 | **20 pass / 1 fail** — test 17 only, diff `"/fixtures/bravo"` → `"bravo"` on all three pairs | 21/0 |
+| M15 | `props.onAction(repo.path, actionId)` (arguments swapped) | 17 | **20 pass / 1 fail** — test 17 only, diff shows the pair transposed | 21/0 |
+| M16 | insert `import { createReposProvider } from '../../../src'` into `ReposPane.tsx` | 19 | **20 pass / 1 fail** — test 19 only | 21/0 |
+| M17 | token moved into a query string on `postAction`'s URL | 20 | **20 pass / 1 fail** — test 20 only | 21/0 |
+| M18 | delete step 1, `if (!input.hasSnapshot) return { kind: 'loading' }` | 1 | **20 pass / 1 fail** — test 1 only | 21/0 |
+| M19 | `isStale`'s strict `>` → `>=` | 7 | **18 pass / 3 fail** — tests **7**, 5 and 8 | 21/0 |
+| M20 | comparator tie-break `a.name.localeCompare(b.name)` → `return 0` | 8 | **20 pass / 1 fail** — test 8 only, BOTH ties flipped in the diff | 21/0 |
+| M21 | drop `.filter((d) => d.reason === 'ambiguous')` | 10 | **20 pass / 1 fail** — test 10 only, `+ "slowpoke"` | 21/0 |
+
+**Eight rows applied, eight observed red on the named test, eight observed 21/0 green on revert. No
+row was recorded from prediction.**
+
+Three observations Task 10 should carry rather than re-derive:
+
+- **M19's blast radius is three tests, not one.** `hotel` moving into `needsAttention` breaks test 5's
+  whole-array equality and test 8's `recent` ordering as well as test 7. Same shape as M2/M3 in Task
+  9's own table: the named test is genuinely red, but "three tests failed" is not by itself evidence
+  the intended edit was applied.
+- **M16 does not crash the module load, contrary to the fix brief's expectation.** The brief warned
+  that the import would execute the CLI's top-level switch. It does not: the binding is unused, so
+  the transpiler elides the import and the other 20 tests stay green. Test 19 reddens purely on the
+  textual grep — which is the right outcome, but for a different reason than predicted.
+- **The bypass M16 covers was confirmed in both directions.** With M16 applied *and* test 19's filter
+  reverted to its pre-fix `l.includes('../src/')` form, the file was **19 pass / 0 fail**: the
+  specifier `'../../../src'` contains no `../src/` substring, so the line was filtered out and the
+  `startsWith('import type')` assertion never ran on it.
+
+**Test numbering shifted, and Task 9's M1–M13 rows name tests by number.** Two tests were inserted.
+Mapping from the task-9 report's numbering (1–18 plus `11b`) to the file at this round's HEAD:
+
+| report | 1–6 | 7 | 8 | 9 | 10 | 11 | 11b | 12 | 13 | 14 | 15 | 16 | 17 | 18 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| now | 1–6 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 21 |
+
+New **7** is the staleness-boundary case and new **20** is the action-POST source grep. So Task 9's
+M13 reddens tests **14 and 19** at this HEAD, not "12 and 17"; M11 reddens test **21**, not 18.
+
+**Carried forward to Task 10 — the `$HOME` hermeticity regression, and it is this round's largest
+uncovered item.**
+
+`src/index.ts:68` now passes `providers: [createReposProvider()]`. With no `deps`,
+`createReposProvider` resolves its scan root as `deps.homeDir ?? homedir()`
+(`src/providers/repos/index.ts:620`), that root is the first entry of `roots`
+(`src/providers/repos/index.ts:383`), and **both** schedules are `runOnStart: true`
+(`src/providers/repos/index.ts:830-831`). So any spawned `serve` whose env does not scope `HOME`
+scans the developer's real home directory on startup and then runs metadata `git` calls against
+everything it finds, at concurrency 8.
+
+**Measured in this round**, spawning the binary under the exact env shape of `test/serve.test.ts:81`
+— `{ ...process.env, XDG_RUNTIME_DIR, XDG_CONFIG_HOME }`, `HOME` unscoped — on a free port:
+`HOME` inside the child is the developer's own, and `/api/state` reports **39 repos discovered, 0
+dropped, 298 ms from spawn**. That independently reproduces the review's figure (39 repos, 255 ms).
+
+Ten spawn sites leak it, every one of them by spreading `...process.env` and scoping only the two XDG
+variables — confirmed by reading all ten:
+
+`test/serve.test.ts:81, 229, 248, 589, 688` · `test/config.test.ts:476, 556, 580, 605` ·
+`scripts/assert-package.ts:48`.
+
+This is **design spec §10 rule 1** — the rule the plan quotes in Task 9's own smoke-test step, and
+which the new smoke test obeys correctly at `test/repos-pane.test.ts:486` with a temp `HOME`.
+
+No test reddens today, because none of those ten sites reads `/api/state`. The cost is **hermeticity**:
+nine tests and `bun run assert:package` now depend on whose home directory runs them, on how many
+repositories it holds, and on how fast they answer git. A developer with a large or slow home
+directory is one timeout away from a failure that blames the server.
+
+**Not fixed here, deliberately: the fix is an edit to nine pre-existing tests plus the packaging
+script, and this round was scoped to forbid exactly that.** The fix itself is one word per site —
+add `HOME: <a temp dir>` to each env literal. Task 10 owns it.
+
+Also still open and not started here, per the fix round's own out-of-scope list: the
+`session ⇄ api` import cycle (`TOKEN_STORAGE_KEY` wants a leaf module — note the production bundle
+enters from the crashing direction); the pane reading neither `wire.errors` nor the `'timed-out'` drop
+reason, which silently reinstates the defect ADR 0002's `timedOut` channel exists to prevent; and
+`store.ts` dropping the `error` frame under a comment naming Task 9 as its owner — Task 9 shipped no
+surface for it and no ruling records the deferral, so it needs one, shaped like Rulings F and G.
