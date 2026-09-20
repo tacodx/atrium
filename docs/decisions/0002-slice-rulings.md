@@ -465,3 +465,101 @@ pane, not in the server log. The next plan that touches `src/core/actions.ts` sh
 with Ruling B's result channel.
 
 **Revisit if** a result channel is added to the `exec` arm, or if the launcher is ever selected per call.
+
+## Ruling F — `lastErrorMessage` stays free text in Plan 2, as a display-only channel; sanitising it is a Plan 3 **precondition**
+
+Open as "R-A" since Task 6. Task 9 is the first task that renders the field, so it is ruled here.
+
+### The facts, from the shipped source
+
+`src/core/scheduler.ts:120-123`:
+
+```ts
+function recordFailure(providerId: string, scheduleName: string, err: unknown): void {
+  h.consecutiveFailures += 1
+  h.lastErrorMessage = (err as Error)?.message ?? String(err)
+}
+```
+
+That string is raw exception text. It reaches the browser on `/api/state`, on `onUpdate`, and in
+every `snapshot`/`update` WS frame **without passing through `toClient`** — the redaction contract
+Task 5 made a required contract member. `ScheduleHealth` is a structural copy in `src/core/wire.ts:32`,
+so nothing in the wire layer narrows it either. A provider exception can therefore carry absolute
+paths, including `$HOME`, to the client verbatim.
+
+### The decision
+
+Free text stays, for Plan 2 only, under three constraints:
+
+1. **Display-only.** The pane renders `reason` as React children and nothing else. It is never
+   parsed, never used to build a URL or a path, and never becomes an action target. This is the same
+   treatment §8.7 already requires for repo names and branches, extended to this string.
+2. **The gap is named, not discovered later.** The channel bypasses `toClient` and can leak absolute
+   paths to an authenticated local client. For Plan 2 that audience is the operator, reading their
+   own paths, over a bearer-authenticated loopback socket — an accepted residual, not a fix.
+3. **A hard precondition on Plan 3:** *no provider that handles a credential may be registered until
+   this channel is sanitised at `recordFailure`.* Plan 2's only provider is `repos`, which shells out
+   to git and holds no secret. The claude provider does hold one, and an exception from it would put
+   an API key on this exact channel. Task 10 writes this into the Plan 3 carry-forward as a gate.
+
+### Why the two alternatives were rejected
+
+**A closed set of codes** (`'spawn-failed' | 'timeout' | …`) in place of the message was the
+first instinct, and reading `recordFailure` refuted it. It lands in `src/core/scheduler.ts`, which
+Task 9 is explicitly forbidden to touch, so it could not ship with the task that motivates it. It
+also contradicts Task 9's own test 3, which pins `reason === 'ENOENT: no such file or directory'`.
+And it discards the diagnostic text at exactly the moment the user needs it: a provider that has
+failed three times running is when the message earns its keep.
+
+**Sanitising at `recordFailure`** — scrubbing `$HOME` and absolute paths in place — is the right
+eventual fix and is what the Plan 3 gate above demands. It is not done now for the same scope
+reason: it is a scheduler edit, it needs its own mutation coverage, and Plan 2 has no provider whose
+exceptions are worth the risk of an untested redaction regex swallowing the message body.
+
+**Revisit if** a second provider is registered, and **before** any provider that touches a secret.
+
+## Ruling G — `onAuthFailure` clears and re-renders. It does **not** re-read the fragment, because there is nothing left to read
+
+Open as "R-B" since Task 6: `web/src/lib/socket.ts:71` and `web/src/main.tsx:48` disagree.
+
+### The disagreement
+
+`socket.ts:69-71`, in the 1008 close branch:
+
+> The caller wires `onAuthFailure` to `clearToken` plus a re-read of the fragment.
+
+`main.tsx:48`, the actual call site:
+
+```ts
+onAuthFailure: () => { clearToken(browserSessionDeps()); setAuthed(false) },
+```
+
+No re-read. The comment describes behaviour that was never written.
+
+### Why the shipped behaviour is the correct one
+
+`acquireToken` (`web/src/lib/session.ts`) scrubs the fragment **before** redeeming it — the order is
+§8.3's requirement and is pinned by test 9/M13:
+
+```ts
+if (handoff !== null) {
+  deps.clearHash()          // ← first
+  const t = await deps.redeem(handoff)
+```
+
+`onAuthFailure` can only fire after a redemption succeeded and the socket later closed 1008. By then
+`location.hash` is `''`, so a re-read parses nothing, `parseHandoff` returns `null`, and the fallback
+`deps.storage.getItem(TOKEN_STORAGE_KEY)` reads the key `clearToken` has just removed. A re-read is a
+guaranteed `null` — it cannot recover a session, it can only add a code path that looks like recovery.
+
+Clear-and-re-render is also the only branch that reaches the user: `main.tsx` renders the
+"Not signed in — run `atrium open --print-url`" prompt on `authed === false`, which is the one
+action that actually restores a session, since a fresh handoff is minted per `startServer`.
+
+### The decision
+
+The shipped behaviour stands. `socket.ts:71`'s comment is stale and is **corrected in Task 10**, in
+the same pass that closes carry-forward P4 — not in Task 9, whose file list is a verification gate
+and does not include `socket.ts`.
+
+**Revisit if** the handoff ever becomes re-redeemable, or a second credential source is added.
