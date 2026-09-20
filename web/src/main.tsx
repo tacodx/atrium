@@ -4,8 +4,10 @@ import './index.css'
 import { WS_PATH } from '../../src/core/wire'
 import { createStore } from './lib/store'
 import { acquireToken, clearToken, browserSessionDeps } from './lib/session'
+import { postReposAction } from './lib/api'
 import { connect, browserSocketDeps } from './lib/socket'
 import type { SocketHandle } from './lib/socket'
+import { ReposPane, deriveReposPaneState } from './panes/ReposPane'
 
 const store = createStore()
 
@@ -25,9 +27,9 @@ const store = createStore()
 // the attribute left the built CSS byte-identical and the gate green.
 
 function App() {
-  // THE live-state call site. Task 9 replaces the <pre> here; there is no
-  // useAtriumState() wrapper hook. The value is AtriumState, so
-  // state.hasSnapshot and state.providers are what a pane derives from.
+  // THE live-state call site; there is no useAtriumState() wrapper hook. The
+  // value is AtriumState, so state.hasSnapshot and state.providers are what
+  // the pane derives from.
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot)
   // null = token acquisition in progress; false = no token; true = connected or connecting.
   const [authed, setAuthed] = useState<boolean | null>(null)
@@ -51,11 +53,20 @@ function App() {
     return () => { cancelled = true; handle?.close() }
   }, [])
 
+  // One Date.now() for both the derivation and the render, so a repo's
+  // staleness verdict and its rendered age can never disagree by a tick.
+  const nowMs = Date.now()
+  const paneState = deriveReposPaneState({
+    hasSnapshot: state.hasSnapshot,
+    providers: state.providers,
+    nowMs,
+  })
+
   return (
     <div className="p-4">
       {authed === false
         ? <p>Not signed in. Run <code>atrium open --print-url</code> and open the printed URL.</p>
-        : <pre>{JSON.stringify(state, null, 2)}</pre>}
+        : <ReposPane state={paneState} nowMs={nowMs} onAction={postReposAction} />}
     </div>
   )
 }

@@ -1,5 +1,6 @@
 import { SESSION_PATH, STATE_PATH } from '../../../src/core/wire'
 import type { WireSnapshot } from '../../../src/core/wire'
+import { TOKEN_STORAGE_KEY } from './session'
 
 // Three same-origin fetch helpers. Every path is relative, the token travels
 // in the Authorization header and NEVER in a URL (§8.3). A same-origin browser
@@ -42,4 +43,28 @@ export async function postAction(
   })
   if (res.status === 200) return { ok: true }
   return { ok: false, error: `${res.status}` }
+}
+
+/**
+ * The repos pane's action entry point. The plan pins this SIGNATURE —
+ * (actionId, path) — and pins that main.tsx passes it straight through as the
+ * pane's `onAction`, which is why the token is not a parameter: main.tsx holds
+ * the token only inside its useEffect closure, never in state, so a
+ * pane-facing signature could not carry one. Reported in the task-9 report as
+ * a cross-task interface gap rather than patched by widening the signature.
+ *
+ * The token is therefore read from storage AT CALL TIME. TOKEN_STORAGE_KEY is
+ * imported from ./session rather than re-spelled: two copies of a storage key
+ * is how a signed-in page starts reading an empty slot. The read lives inside
+ * the body, so this module still has no module-scope browser access (see the
+ * note at the top of this file) and stays importable under `bun test`.
+ *
+ * No second fetch implementation: this delegates to postAction above. With no
+ * stored token it resolves without a fetch — there is nothing to authenticate
+ * with, and the request could only ever 401.
+ */
+export async function postReposAction(actionId: string, path: string): Promise<void> {
+  const token = localStorage.getItem(TOKEN_STORAGE_KEY)
+  if (token === null) return
+  await postAction(token, 'repos', actionId, { path })
 }
