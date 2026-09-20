@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { startServer } from './server/serve'
 import { loadConfig, ConfigError } from './core/config'
 import { handoffPath } from './core/paths'
+import { createReposProvider } from './providers/repos/index'
 
 const argv = process.argv.slice(2)
 const cmd = argv[0] ?? 'serve'
@@ -61,9 +62,10 @@ switch (cmd) {
       // file, so the port cannot be resolved until the file has been read.
       const config = loadConfig()
       const port = resolvePort(config)
-      // Providers are registered through ServeConfig.providers; nothing
-      // registers one yet — that wiring lands with the repos provider.
-      await startServer({ port, config })
+      // A FACTORY CALL, not a module-scope instance: the closure holds a repo
+      // table, and a shared instance would be reused by any future second
+      // server in the same process.
+      await startServer({ port, config, providers: [createReposProvider()] })
     } catch (e) {
       if (e instanceof ConfigError) {
         console.error(`atrium: ${e.message}`)
