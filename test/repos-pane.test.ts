@@ -31,15 +31,40 @@ const ROOT = join(import.meta.dir, '..')
 const NOW_MS = Date.UTC(2026, 8, 14, 12, 0, 0)
 const NOW_S = NOW_MS / 1000
 
-// `echo`'s `branch` and `lastCommitAt` keys are GENUINELY ABSENT, not
-// present-and-undefined: the provider omits them, and a fixture that spelled
-// them out as undefined would hide a `=== null` bug in the pane.
+// `echo`'s and `foxtrot`'s `branch` and `lastCommitAt` keys are GENUINELY
+// ABSENT, not present-and-undefined: the provider omits them, and a fixture
+// that spelled them out as undefined would hide a `=== null` bug in the pane.
+//
+// Three of these eight repos exist only to make a stated property FAIL when it
+// is broken, each measured green without them:
+//
+//  - `golf` shares `alpha`'s lastCommitAt and is listed BEFORE it while sorting
+//    AFTER it by name, and `foxtrot` does the same against `echo` on the undated
+//    side. Array.prototype.sort is stable, so a comparator whose tie-break
+//    became `return 0` would leave both pairs in this listed order — which is
+//    the only reason test 7's equality can see the tie-break at all (M20). Both
+//    pairs are needed: the spec names the undated-vs-undated tie explicitly.
+//  - `hotel`'s last commit sits on the staleness boundary EXACTLY, which is the
+//    only fixture the strict `>` in isStale decides (M19).
+//
+// `dropped` carries a second row whose reason is NOT 'ambiguous', because with
+// one already-ambiguous row the `.filter` in the derivation could be deleted
+// outright and stay green (M21). That the 'timed-out' row reaches no surface at
+// all is Lens B's M-5, carried to Task 10, not asserted here.
 const READY_WIRE: ReposWire = {
   staleDays: 30,
   scannedAt: NOW_MS,
   errors: [],
-  dropped: [{ id: 'd1', name: 'ambig', reason: 'ambiguous' }],
+  dropped: [
+    { id: 'd1', name: 'ambig', reason: 'ambiguous' },
+    { id: 'd2', name: 'slowpoke', reason: 'timed-out' },
+  ],
   repos: [
+    {
+      id: 'golf', path: '/fixtures/golf', name: 'golf', bare: false, origin: 'top-level',
+      metaStatus: 'ok', branch: 'main', repoState: 'clean',
+      lastCommitAt: NOW_S - 7200, uncommittedCount: 0,
+    },
     {
       id: 'alpha', path: '/fixtures/alpha', name: 'alpha', bare: false, origin: 'top-level',
       metaStatus: 'ok', branch: 'main', repoState: 'clean',
@@ -59,6 +84,15 @@ const READY_WIRE: ReposWire = {
       id: 'delta', path: '/fixtures/delta', name: 'delta', bare: false, origin: 'top-level',
       metaStatus: 'ok', branch: 'main', repoState: 'clean',
       lastCommitAt: NOW_S - 3600, uncommittedCount: 12,
+    },
+    {
+      id: 'hotel', path: '/fixtures/hotel', name: 'hotel', bare: false, origin: 'top-level',
+      metaStatus: 'ok', branch: 'main', repoState: 'clean',
+      lastCommitAt: NOW_S - 30 * 86400, uncommittedCount: 1,
+    },
+    {
+      id: 'foxtrot', path: '/fixtures/foxtrot', name: 'foxtrot', bare: false, origin: 'top-level',
+      metaStatus: 'ok', repoState: 'empty', uncommittedCount: 0,
     },
     {
       id: 'echo', path: '/fixtures/echo', name: 'echo', bare: false, origin: 'top-level',
@@ -158,7 +192,11 @@ function actionButtonsOf(
 // --- Derivation cases ---------------------------------------------------------
 
 test('derives loading before the first snapshot frame', () => {
-  expect(derive({}, false).kind).toBe('loading')
+  // A POPULATED providers map, deliberately: with `providers: {}` this test
+  // passed on step 2's absent-entry branch, so deleting step 1's hasSnapshot
+  // guard entirely was measured green (M18). Handed a snapshot that WOULD
+  // derive `ready`, the assertion can only pass through step 1.
+  expect(derive({ repos: { data: READY_WIRE, schedules: {} } }, false).kind).toBe('loading')
 })
 
 test('derives loading when the snapshot carries no repos entry yet', () => {
@@ -188,19 +226,43 @@ test('a repo with no commits is never stale, however dirty', () => {
   expect(s.needsAttention.map((r) => r.name)).not.toContain('echo')
 })
 
+test('a repo exactly on the staleness boundary is not yet stale', () => {
+  // `hotel`'s last commit is at EXACTLY nowMs - staleDays * MS_PER_DAY, so the
+  // strict `>` in isStale is the ONLY thing deciding it, and it carries
+  // uncommittedCount 1 so a `>=` moves it into needsAttention rather than
+  // merely relabelling it. Without a fixture on the boundary, `>` -> `>=` was
+  // measured green (M19). The first assertion pins that the fixture really is
+  // on the boundary: nudging that literal later would silently un-pin the rest.
+  const hotel = READY_WIRE.repos.find((r) => r.name === 'hotel')!
+  expect(hotel.lastCommitAt).toBe(NOW_S - READY_WIRE.staleDays * 86400)
+  const s = readyFrom(READY_WIRE)
+  expect(s.needsAttention.map((r) => r.name)).not.toContain('hotel')
+  expect(s.recent.map((r) => r.name)).toContain('hotel')
+})
+
 test('recent is ordered most-recent-first with undated repos last', () => {
-  expect(readyFrom(READY_WIRE).recent.map((r) => r.name)).toEqual(['delta', 'alpha', 'charlie', 'echo'])
+  // Both ties are load-bearing, and both are listed in READY_WIRE in the
+  // opposite order to the one asserted here: golf before alpha, foxtrot before
+  // echo. sort is stable, so a tie-break of `return 0` yields the listed order
+  // and this equality sees it (M20).
+  expect(readyFrom(READY_WIRE).recent.map((r) => r.name)).toEqual([
+    'delta', 'alpha', 'golf', 'hotel', 'charlie', 'echo', 'foxtrot',
+  ])
 })
 
 test('a repo appears in exactly one group', () => {
   const s = readyFrom(READY_WIRE)
   const all = [...s.needsAttention, ...s.recent].map((r) => r.name)
-  expect(all.length).toBe(5)
-  expect(new Set(all).size).toBe(5)
+  expect(all.length).toBe(8)
+  expect(new Set(all).size).toBe(8)
 })
 
 test('droppedAmbiguous is reported, not discarded', () => {
   const s = readyFrom(READY_WIRE)
+  // AMBIGUOUS only. READY_WIRE also drops `slowpoke` with reason 'timed-out',
+  // so removing the `.filter(d => d.reason === 'ambiguous')` from the
+  // derivation reddens this equality; with one already-ambiguous row it was
+  // measured green (M21).
   expect(s.droppedAmbiguous).toEqual(['ambig'])
   const html = render(s)
   expect(html).toContain('1 candidate(s) hidden as ambiguous')
@@ -210,7 +272,7 @@ test('droppedAmbiguous is reported, not discarded', () => {
   // actually wants is that a DROPPED candidate contributes no path and no row,
   // which is what these two assertions pin.
   expect(html).not.toContain('/fixtures/ambig')
-  expect(html.split('data-repo=').length - 1).toBe(5)
+  expect(html.split('data-repo=').length - 1).toBe(8)
 })
 
 // --- Presentation cases -------------------------------------------------------
@@ -294,7 +356,7 @@ test('actions are POST buttons, never links or forms', () => {
     expect(html.slice(i, i + MARKER.length)).toBe(MARKER)
     seen += 1
   }
-  expect(seen).toBe(15) // five repos, three actions each
+  expect(seen).toBe(24) // eight repos, three actions each
 
   expect(html).not.toContain('<a ')
   expect(html).not.toContain('<form')
