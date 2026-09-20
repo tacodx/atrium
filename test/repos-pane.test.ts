@@ -348,7 +348,17 @@ test('the pane source contains no injection sink and no value import from src/',
   for (const sink of ['dangerouslySetInnerHTML', 'new URL(', 'style={{']) {
     expect(src).not.toContain(sink)
   }
-  const fromServerTree = src.split('\n').filter((l) => l.includes('../src/'))
+  // Match the SPECIFIER, not a substring. `l.includes('../src/')` had a
+  // reachable bypass, verified by execution: `'../../../src'` with no trailing
+  // slash contains no `../src/`, so the line was skipped entirely and the
+  // assertion never ran on it — and `src/index.ts` exists, so that very
+  // specifier resolves through the provider chain to node:child_process. The
+  // half of this tripwire that keeps the server tree out of the browser bundle
+  // was therefore itself untested in the direction that matters (M6 and M13
+  // both redden this test through the SINK list, not through this line). The
+  // form below catches the bypass and still matches the two genuine type
+  // imports (M16).
+  const fromServerTree = src.split('\n').filter((l) => /from\s+'[^']*(\.\.\/)+src(\/|')/.test(l))
   expect(fromServerTree.length).toBeGreaterThan(0)
   for (const line of fromServerTree) expect(line.startsWith('import type')).toBe(true)
 })
