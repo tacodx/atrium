@@ -43,10 +43,14 @@ rest of the list above.
 atrium already listening on 7373 and `./atrium` replaced by a stub that exits 1, `bun run assert:package`
 printed `packaging ok` and exited 0 — it never checked that the `/healthz` it polled belonged to the child it
 spawned. The script now rejects a `/healthz` whose `pid` is not `proc.pid`, and fails if the child has already
-exited, with a message naming the foreign listener. `test/verify-gate.test.ts` pins it: the script runs
-against a stub binary and a temp web-dist with a *convincing* decoy on 7443, and must exit non-zero naming a
-foreign listener. With the check deleted, that test's decoy run prints `packaging ok: 3 of 3 assets
-embedded…` — the original vacuous pass, reproduced.
+exited, with a message naming the foreign listener. `test/verify-gate.test.ts` pins each check with its own
+test, against a stub binary and a temp web-dist. The pid check: a stub that stays alive and never binds, with
+a *convincing* decoy on 7443; the run must fail with `is not the spawned binary's pid`. With that check
+deleted, the decoy run prints `packaging ok: 3 of 3 assets embedded…` — the original vacuous pass,
+reproduced. The exit check: a stub that exits at once with nothing on 7444; the run must fail with
+`exited (code 1) before it could be tested`. (Fix round F1: the first version had one test, whose stub
+exited, asserting only `foreign listener` — a substring the exit check's message also carries, so it stayed
+green with the pid check deleted. Deleting either check alone now reddens only its own test.)
 
 **Correction to the plan.** The plan warned that a dev server left on 7373 makes the gate fail with
 `binary never started listening within 5s`. Measured by the pre-flight at 5f15053, that was wrong: with a
@@ -61,7 +65,10 @@ handoff file found — is the server running?") while the server was running. Th
 `XDG_CONFIG_HOME` and `XDG_RUNTIME_DIR`, removed in the `finally` after the child is killed and reaped. After
 the fix, the same measurement leaves both files intact and `open --print-url` exits 0. Every other source-run
 `serve` spawn in the suite got a temp `HOME` in the same pass, and a structural test requires all ten to
-stay that way.
+stay that way. It resolves a property of a helper's return value against the object literal the helper
+actually returns (fix round F2: `HOME: env.HOME!`, a key `scratchConfig` never sets, used to pass), and
+cross-checks its strict `Bun.spawn([… 'serve' …])` matcher against a loose per-file count of quoted `'serve'`
+literals, so a spawn in a shape the matcher cannot see makes the two disagree.
 
 ## (b) The CI pin
 
@@ -69,7 +76,10 @@ stay that way.
 `bun install --frozen-lockfile`, `bun run verify`. The pin must equal `engines.bun`'s floor (`>=1.3.11`, ADR
 0001); `test/verify-gate.test.ts` extracts both with line-anchored regexes, asserts both matched (the
 anti-vacuity step), and asserts they are equal. It also rejects `continue-on-error` and any step-level `if:`,
-either of which would let a red `verify` pass the job.
+either of which would let a red `verify` pass the job. Since fix round F4 it also requires `push:` and
+`pull_request:` triggers under `on:` (so CI cannot quietly become manual-only), and exactly one
+`oven-sh/setup-bun` and one `bun-version` (a second, unpinned setup-bun step would otherwise override the pin).
+Since F3, `typecheck` must contain `tsc --noEmit` and `build` must run both `build:web` and `build:server`.
 
 **Deviation from the plan: `actions/checkout@v5`, not `@v4`.** `actions/checkout@v4`'s `action.yml` declares
 `using: node20`; GitHub's changelog "Deprecation of Node 20 on GitHub Actions runners" (2025-09-19,
