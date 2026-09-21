@@ -349,7 +349,7 @@ test('every server spawn scopes HOME, XDG_RUNTIME_DIR and XDG_CONFIG_HOME to a t
 // deleting only the exit block reddens the second alone.
 //
 // A temp web-dist is used, never the repo's: the script renames the directory
-// it is given. Ports 7442, 7443 and 7444 are in 10a's range (7440-7449).
+// it is given. Ports 7442-7445 are in 10a's range (7440-7449).
 
 const DECOY_HTML = '<!doctype html><link rel="stylesheet" href="/assets/a.css"><script type="module" src="/assets/a.js"></script>'
 
@@ -440,27 +440,35 @@ test('assert:package reports a spawned binary that exits before it could be test
   }
 })
 
-test('assert:package fails the measured scenario: a stub that exits 1 while a convincing listener answers', async () => {
-  // Fix round 2, item A. The two tests above isolate one check each, so
-  // neither runs what Task 10a actually measured: a dead stub AND a live,
-  // convincing listener at once. A mutation that makes each check stand down
-  // exactly when the other one's isolated test cannot see it (the pid check
-  // only while the child is alive, the exit check only when nothing answered)
-  // kept both green while this scenario printed "packaging ok". This test pins
-  // the OUTCOME only — non-zero exit, no "packaging ok" — and deliberately no
-  // message substring: coupling to a message is how the first vacuity hid.
-  const PORT = 7442
-  const { dir, dist } = scratchDist('atrium-t10a-both-')
-  const stub = join(dir, 'stub')
-  writeFileSync(stub, '#!/bin/sh\nexit 1\n', { mode: 0o755 })
-  const decoy = convincingDecoy(PORT)
-  try {
-    const { code, stdout } = await runAssertPackage(stub, dist, dir, PORT)
-    expect(stdout).not.toContain('packaging ok')
-    expect(code).not.toBe(0)
-    expect(existsSync(dist)).toBe(true)
-  } finally {
-    decoy.stop(true)
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
+// Fix round 3, item B1: this ran an exit-1 stub only. Making the pid check
+// stand down once the child had exited, and the exit check ignore exit code 0,
+// kept every test green while an exit-0 stub with a convincing decoy printed
+// "packaging ok" — a compiled `serve` that falls off the end and exits 0 (the
+// bug class test/fixtures/exit-probe.ts exists for) with a dev server on 7373.
+// With the pid test (stub alive) and the exit test (no listener), the stub
+// space {alive, exits 0, exits non-zero} x {decoy, none} is now covered.
+for (const [exitCode, PORT] of [[0, 7445], [1, 7442]] as const) {
+  test(`assert:package fails the measured scenario: a stub that exits ${exitCode} while a convincing listener answers`, async () => {
+    // Fix round 2, item A. The two tests above isolate one check each, so
+    // neither runs what Task 10a actually measured: a dead stub AND a live,
+    // convincing listener at once. A mutation that makes each check stand down
+    // exactly when the other one's isolated test cannot see it (the pid check
+    // only while the child is alive, the exit check only when nothing answered)
+    // kept both green while this scenario printed "packaging ok". This test pins
+    // the OUTCOME only — non-zero exit, no "packaging ok" — and deliberately no
+    // message substring: coupling to a message is how the first vacuity hid.
+    const { dir, dist } = scratchDist(`atrium-t10a-both${exitCode}-`)
+    const stub = join(dir, 'stub')
+    writeFileSync(stub, `#!/bin/sh\nexit ${exitCode}\n`, { mode: 0o755 })
+    const decoy = convincingDecoy(PORT)
+    try {
+      const { code, stdout } = await runAssertPackage(stub, dist, dir, PORT)
+      expect(stdout).not.toContain('packaging ok')
+      expect(code).not.toBe(0)
+      expect(existsSync(dist)).toBe(true)
+    } finally {
+      decoy.stop(true)
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+}
