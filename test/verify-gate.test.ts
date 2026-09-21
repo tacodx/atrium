@@ -275,14 +275,27 @@ function unscopedKeys(site: Site): string[] {
   return SCOPED.filter((key) => !propIsTempDir(env, key, site.sf, 0))
 }
 
-// One entry per quoted 'serve' string literal, by file: the loose half of the
-// cross-check below.
-function looseServeLiterals(): string[] {
+// The loose half of the cross-check below, one entry per hit, by file: every
+// Bun.spawn / Bun.spawnSync call whose source text contains the word `serve`
+// anywhere (argv spread from a split string, a `sh -c` command line, …), plus
+// every quoted 'serve' string outside such a call (argv built in a variable).
+// Fix round 2, item B: this used to count quoted 'serve' literals only, so
+// `...'serve --port 7445'.split(' ')` and a `sh -c` template line passed.
+function looseServeHits(): string[] {
   const self = join('test', 'verify-gate.test.ts')
   const out: string[] = []
   for (const file of [...tsFilesUnder('test'), ...tsFilesUnder('scripts')]) {
     if (file === self) continue
-    for (const _ of readFileSync(file, 'utf8').matchAll(/(['"])serve\1/g)) out.push(file)
+    const sf = ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, true)
+    const visit = (n: ts.Node): void => {
+      if (ts.isCallExpression(n) && /^Bun\.spawn(Sync)?$/.test(n.expression.getText(sf)) && /\bserve\b/.test(n.getText(sf))) {
+        out.push(file)
+        return
+      }
+      if (ts.isStringLiteralLike(n) && n.text === 'serve') out.push(file)
+      ts.forEachChild(n, visit)
+    }
+    visit(sf)
   }
   return out.sort()
 }
@@ -297,11 +310,12 @@ test('every server spawn scopes HOME, XDG_RUNTIME_DIR and XDG_CONFIG_HOME to a t
   // sees Bun.spawn([<array literal containing 'serve'>], …). A server spawn in
   // any other shape — argv built in a variable, spread from a helper — is
   // invisible to it, and the fixed count stays 10. So also count, deliberately
-  // loosely, every quoted 'serve' string in test/ and scripts/ (this file
-  // excepted: it names the literal itself). A spawn the matcher misses still
-  // has to spell 'serve' somewhere, and the two counts then disagree. A stray
-  // quoted 'serve' that is not a spawn fails this too: fail closed.
-  expect(looseServeLiterals()).toEqual(sites.map((s) => s.where.replace(/:\d+$/, '')).sort())
+  // loosely, every Bun.spawn call in test/ and scripts/ whose text says
+  // `serve`, and every quoted 'serve' outside one (this file excepted: it
+  // names both). A spawn the matcher misses still has to spell serve
+  // somewhere, and the two counts then disagree. A stray quoted 'serve' that
+  // is not a spawn fails this too: fail closed.
+  expect(looseServeHits()).toEqual(sites.map((s) => s.where.replace(/:\d+$/, '')).sort())
   const leaks = sites.flatMap((s) => unscopedKeys(s).map((k) => `${s.where}: ${k}`))
   expect(leaks).toEqual([])
 })
