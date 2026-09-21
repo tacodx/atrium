@@ -282,33 +282,38 @@ test('a junk message body neither throws out of the listener nor moves the store
 test('an error frame is dropped before and after the snapshot: no state change, no notification', () => {
   expect(WIRE_ERROR_CODES.length).toBe(4)
 
-  // Phase 1: connected, no snapshot yet.
-  const fresh = createStore()
-  fresh.setConnected(true)
-  let freshNotified = 0
-  fresh.subscribe(() => { freshNotified += 1 })
-  const s0 = fresh.getSnapshot()
-  const s0Copy = structuredClone(s0)
-  expect(s0Copy).toEqual({ connected: true, hasSnapshot: false, providers: {} })
-  for (const code of WIRE_ERROR_CODES) {
-    fresh.apply({ type: 'error', code, message: WIRE_ERROR_MESSAGES[code] })
-  }
-  expect(fresh.getSnapshot()).toBe(s0)
-  expect(fresh.getSnapshot().hasSnapshot).toBe(false)
-  expect(fresh.getSnapshot()).toEqual(s0Copy)
-  expect(fresh.getSnapshot()).toEqual({ connected: true, hasSnapshot: false, providers: {} })
-  expect(freshNotified).toBe(0)
-
-  // Phase 2: connected, after a real snapshot.
+  // ONE store runs the whole sequence: errors in place of the snapshot, then
+  // the snapshot, then errors after it. Splitting the phases across two stores
+  // hides the hazard Ruling H defers: an error before the snapshot that
+  // poisons the store, or drops its subscribers, so the snapshot that follows
+  // never reaches the pane and it reads loading forever. The store is
+  // connected throughout, so a flip of `connected` is visible in both phases.
   const store = createStore()
   store.setConnected(true)
   let notified = 0
   store.subscribe(() => { notified += 1 })
+
+  // Phase 1: connected, no snapshot yet.
+  const s0 = store.getSnapshot()
+  const s0Copy = structuredClone(s0)
+  expect(s0Copy).toEqual({ connected: true, hasSnapshot: false, providers: {} })
+  for (const code of WIRE_ERROR_CODES) {
+    store.apply({ type: 'error', code, message: WIRE_ERROR_MESSAGES[code] })
+  }
+  expect(store.getSnapshot()).toBe(s0)
+  expect(store.getSnapshot().hasSnapshot).toBe(false)
+  expect(store.getSnapshot()).toEqual(s0Copy)
+  expect(store.getSnapshot()).toEqual({ connected: true, hasSnapshot: false, providers: {} })
+  expect(notified).toBe(0)
+
+  // The snapshot after the errors still lands, and still notifies.
   store.apply({ type: 'snapshot', providers: { a: { data: { n: 1 }, schedules: {} } } })
   expect(notified).toBe(1)
+  expect(store.getSnapshot()).toEqual({ connected: true, hasSnapshot: true, providers: { a: { data: { n: 1 }, schedules: {} } } })
+
+  // Phase 2: connected, after the snapshot.
   const before = store.getSnapshot()
   const beforeCopy = structuredClone(before)
-  expect(beforeCopy).toEqual({ connected: true, hasSnapshot: true, providers: { a: { data: { n: 1 }, schedules: {} } } })
   for (const code of WIRE_ERROR_CODES) {
     store.apply({ type: 'error', code, message: WIRE_ERROR_MESSAGES[code] })
   }
