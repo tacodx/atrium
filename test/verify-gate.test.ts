@@ -50,6 +50,17 @@ test('CI runs the verify gate, not a bare test run', () => {
   expect(workflow).not.toMatch(/^\s*(-\s*)?if:/m)
 })
 
+test('CI runs on its own: push and pull_request triggers under on:', () => {
+  // Fix round F4: replacing the triggers with `on: workflow_dispatch:` kept
+  // every test green, and CI would then never run unless started by hand.
+  // Block form only: the `on:` key at column 0, its triggers indented under it
+  // up to the next column-0 key. Any other shape fails closed.
+  const block = workflow.match(/^on:[ \t]*\n((?:[ \t]+.*\n|[ \t]*\n)*)/m)
+  expect(block).not.toBeNull()
+  expect(block![1]).toMatch(/^[ \t]+push:/m)
+  expect(block![1]).toMatch(/^[ \t]+pull_request:/m)
+})
+
 test('CI pins bun to the engines floor', () => {
   // Line-anchored, so a comment or a suffixed version cannot satisfy it.
   const pin = workflow.match(/^\s*bun-version:\s*(['"]?)(\d+\.\d+\.\d+)\1\s*$/m)
@@ -59,6 +70,11 @@ test('CI pins bun to the engines floor', () => {
   expect(pin).not.toBeNull()
   expect(floor).not.toBeNull()
   expect(pin![2]).toBe(floor![1]!)
+  // Fix round F4: a SECOND setup-bun step with a flow-style
+  // `with: { bun-version: latest }` after the pinned one passed the
+  // line-anchored match above, and the later step wins. Exactly one of each.
+  expect(workflow.match(/oven-sh\/setup-bun/g) ?? []).toHaveLength(1)
+  expect(workflow.match(/bun-version/g) ?? []).toHaveLength(1)
 })
 
 // --- Task 10a (7): every server spawn is hermetic. ---
