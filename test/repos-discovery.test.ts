@@ -397,6 +397,99 @@ test('a submodule under an ignored mods/ is still dropped as submodule', async (
   expect(data.dropped).toEqual([{ id: repoId(real(sub)), path: real(sub), name: 'sub', reason: 'submodule' }])
 })
 
+// Closing the space the pre-flight measured (P1), design rule 2: every name
+// that misclassified under the bare pathspec AND can exist as a directory,
+// each beside the decoy its bare form matches. `:/x` is left out: it needs a
+// directory named `:`, and `:x` already pins a leading colon. The four named
+// pins above stay; these tables add every other name, one test per row, so a
+// hand-rolled escape that covers some metacharacters and not others goes red
+// on the names it misses. Measured bare matches (git 2.43.0 and 2.55.0):
+//   a[1] -> a1, * -> every entry, ?x -> ax, a\b -> ab (a glob escape),
+//   :x -> x, :!x -> every entry but x, :(top)x -> x.
+// For `*` and `:!x` the row-2 decoy is a submodule at `+s`, which sorts before
+// .gitmodules and x.txt, because row 2 reads only the FIRST ls-files -s line.
+const PATHSPEC_NAMES: ReadonlyArray<{ name: string; tracked: string; submodule: string }> = [
+  { name: 'a[1]', tracked: 'a1', submodule: 'a1' },
+  { name: '*', tracked: 'y', submodule: '+s' },
+  { name: '?x', tracked: 'ax', submodule: 'ax' },
+  { name: 'a\\b', tracked: 'ab', submodule: 'ab' },
+  { name: ':x', tracked: 'x', submodule: 'x' },
+  { name: ':!x', tracked: 'y', submodule: '+s' },
+  { name: ':(top)x', tracked: 'x', submodule: 'x' },
+]
+
+test('the pathspec tables cover every measured directory name, exactly', () => {
+  expect(PATHSPEC_NAMES.map((n) => n.name)).toEqual(['a[1]', '*', '?x', 'a\\b', ':x', ':!x', ':(top)x'])
+})
+
+// realpath of the PARENT only: bun 1.3.11's realpathSync throws ENOENT on an
+// existing directory whose name holds a backslash (measured), so `a\b` is
+// joined onto its parent's real path rather than resolved itself.
+const childPath = (parent: string, child: string) => join(real(parent), basename(child))
+
+/** How discovery settled `path`: a drop reason, or the surfaced origin. */
+function verdict(data: ReposData, path: string): string {
+  const d = data.dropped.find((x) => x.path === path)
+  const r = data.repos.find((x) => x.path === path)
+  return d !== undefined ? d.reason : r !== undefined ? r.origin : '<not found>'
+}
+
+test('row 3 is literal for every measured name: a tracked decoy never claims the child', async () => {
+  const root = makeScanRoot()
+  const got: Record<string, string> = {}
+  const children: Array<[string, string]> = []
+  PATHSPEC_NAMES.forEach(({ name, tracked }, i) => {
+    const parent = makeRepoIn(root, `p${i}`)
+    writeFileSync(join(parent, tracked), 'decoy\n')
+    commitAll(parent, 'decoy')
+    children.push([name, childPath(parent, makeRepoIn(parent, name))])
+  })
+  const data = await discover(root)
+  for (const [name, child] of children) got[name] = verdict(data, child)
+  expect(got).toEqual(Object.fromEntries(PATHSPEC_NAMES.map((n) => [n.name, 'ambiguous'])))
+})
+
+test('row 2 is literal for every measured name: a submodule decoy never claims the child', async () => {
+  const root = makeScanRoot()
+  const got: Record<string, string> = {}
+  const decoys: Record<string, string> = {}
+  const children: Array<[string, string, string]> = []
+  PATHSPEC_NAMES.forEach(({ name, submodule }, i) => {
+    const parent = makeRepoIn(root, `p${i}`)
+    const sub = addSubmodule(parent, makeRepoIn(root, `lib${i}`), submodule)
+    children.push([name, childPath(parent, makeRepoIn(parent, name)), real(sub)])
+  })
+  const data = await discover(root)
+  for (const [name, child, sub] of children) {
+    got[name] = verdict(data, child)
+    decoys[name] = verdict(data, sub)
+  }
+  // Positive control: every decoy really is a submodule to the classifier.
+  expect(decoys).toEqual(Object.fromEntries(PATHSPEC_NAMES.map((n) => [n.name, 'submodule'])))
+  expect(got).toEqual(Object.fromEntries(PATHSPEC_NAMES.map((n) => [n.name, 'ambiguous'])))
+})
+
+// Row 4: the child is ignored by an escaped, anchored rule, and the parent
+// tracks the decoy the bare name matches, so a check-ignore that consults the
+// index as a glob, or reads a leading ':' as magic, answers "not ignored".
+const gitignoreLiteral = (name: string) => `/${name.replace(/[\\[\]*?]/g, '\\$&')}/`
+
+test('row 4 is literal for every measured name: an ignored child surfaces as a container child', async () => {
+  const root = makeScanRoot()
+  const got: Record<string, string> = {}
+  const children: Array<[string, string]> = []
+  PATHSPEC_NAMES.forEach(({ name, tracked }, i) => {
+    const parent = makeRepoIn(root, `p${i}`)
+    writeFileSync(join(parent, tracked), 'decoy\n')
+    commitAll(parent, 'decoy')
+    writeGitignore(parent, [gitignoreLiteral(name)])
+    children.push([name, childPath(parent, makeRepoIn(parent, name))])
+  })
+  const data = await discover(root)
+  for (const [name, child] of children) got[name] = verdict(data, child)
+  expect(got).toEqual(Object.fromEntries(PATHSPEC_NAMES.map((n) => [n.name, 'container-child'])))
+})
+
 test('a candidate whose classification git call times out is reported as timed-out, never as ambiguous', async () => {
   const root = makeScanRoot()
   containerFixture(root)
