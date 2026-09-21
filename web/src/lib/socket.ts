@@ -68,7 +68,9 @@ export function connect(deps: SocketDeps): SocketHandle {
       // 1008 is the server's code for a bad first frame AND for the
       // auth-window timeout; both mean the stored token is worthless. Stop
       // permanently — no reconnect, ever (test 12, M16). The caller wires
-      // onAuthFailure to clearToken plus a re-read of the fragment.
+      // onAuthFailure to clearToken plus a re-render into the signed-out
+      // prompt. It does NOT re-read the fragment: acquireToken scrubbed it
+      // before redeeming, so there is nothing left to read (ADR 0002 Ruling G).
       if ((ev as CloseEvent).code === 1008) {
         disposed = true
         deps.onAuthFailure()
