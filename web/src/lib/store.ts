@@ -70,7 +70,15 @@ export function createStore(): Store {
           return
         }
         case 'error':
-          return                         // dropped; a visible error surface is Task 9's job
+          // Dropped: no state change, no notification (ADR 0002 Ruling H).
+          // The shipped client cannot provoke one: it sends a single frame,
+          // `auth`, and a bad auth is a 1008 close, not an error frame.
+          // `unserializable` needs a toClient value JSON.stringify throws on,
+          // and reposToClient never builds one. The frame names no provider,
+          // so no pane can own it. The hazard this defers: an `unserializable`
+          // sent IN PLACE of the snapshot leaves hasSnapshot false, and every
+          // pane reads loading indefinitely. Revisit with the second provider.
+          return
       }
     },
 

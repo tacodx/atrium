@@ -564,6 +564,50 @@ and does not include `socket.ts`.
 
 **Revisit if** the handoff ever becomes re-redeemable, or a second credential source is added.
 
+## Ruling H — the wire `error` frame is dropped by the client, deliberately; the visible surface is deferred
+
+Appended by the Task 10 closeout (review Lens B's M-6). The plan's Task 6 spec said "a visible error surface is
+Task 9's job"; Task 9's pane has no wire-error input, `web/src/lib/api.ts` handed it to Task 10, and Task 10's
+file list held neither `store.ts` nor `main.tsx`. Nobody owned it. This ruling owns it.
+
+### The facts, from the shipped source
+
+- `WireErrorCode` is a closed set of four: `bad-frame`, `unknown-frame-type`, `unknown-provider`,
+  `unserializable` (`src/core/wire.ts`, `WIRE_ERROR_CODES`). The message is always `WIRE_ERROR_MESSAGES[code]`.
+- The first three answer a post-auth frame the client sent. The shipped client sends exactly one frame per
+  socket, `auth` (`web/src/lib/socket.ts`), and a bad or missing auth is a 1008 close, never an error frame.
+  They are reachable only from a non-shipped client that already holds the bearer token.
+- `unserializable` is sent by `serve.ts`'s `frameJson` IN PLACE of a frame whose `JSON.stringify` throws — the
+  post-auth snapshot, or an `onUpdate` publish. It names no provider. The only registered provider is `repos`,
+  and `reposToClient` is a field-by-field allowlist of strings, numbers, booleans, arrays and plain objects,
+  so it is unreachable today.
+- The client's store drops the frame: no state change, no notification (`web/src/lib/store.ts`, `case 'error'`).
+
+### The decision
+
+**Defer the visible surface; pin the drop.** None of the four codes is reachable in normal operation, the frame
+cannot be attributed to a pane, and a surface built now would be tested only against hand-built frames for a
+state the product cannot reach. `main.tsx` cannot be imported under `bun test`, so a banner there would ship
+untested.
+
+### The consequence, in one sentence
+
+Once reachable, an `unserializable` frame sent in place of the snapshot leaves `hasSnapshot` false, so every pane
+reads `loading` indefinitely with no error anywhere — and reconnecting gets the same frame again.
+
+### The pin
+
+`test/client-wire.test.ts` — "an error frame is dropped before and after the snapshot: no state change, no
+notification". Two phases, because the hazard is an error IN PLACE of the snapshot: every `WIRE_ERROR_CODES`
+frame applied to a fresh store leaves `hasSnapshot === false`, zero notifications and the state deep-equal to a
+`structuredClone` taken before; then the same after a snapshot. It is a characterization pin for the deferral:
+when the surface is built, it is rewritten with it.
+
+**Revisit if** a second provider is registered (the same trigger as Ruling F — pair them), or the client ever
+sends a post-auth frame. The cheapest correct surface then: the store latches an error frame that arrives before
+the first snapshot, and `deriveReposPaneState` maps it to `unavailable` with `WIRE_ERROR_MESSAGES[code]` as the
+reason — truthful, because a failed snapshot really does leave the client with no data.
+
 ## Ruling I — the exec guard refuses the whole git suite, fail closed. It is a tripwire, not a sandbox
 
 Appended by the Task 10 closeout. It corrects the plan ledger's carry-forward item 1, which named the gap but

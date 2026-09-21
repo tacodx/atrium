@@ -5,6 +5,7 @@ import { connect } from '../web/src/lib/socket'
 import type { SocketDeps } from '../web/src/lib/socket'
 import { createStore } from '../web/src/lib/store'
 import type { ServerFrame } from '../src/core/wire'
+import { WIRE_ERROR_CODES, WIRE_ERROR_MESSAGES } from '../src/core/wire'
 
 // No server, no ports, no DOM — every dependency is injected. These exist
 // because the scoping doc specifies the ORDERING and FAILURE HANDLING of the
@@ -263,4 +264,42 @@ test('a junk message body neither throws out of the listener nor moves the store
   }
   expect(store.getSnapshot()).toBe(before)
   expect(store.getSnapshot().providers.a).toEqual({ data: { n: 1 }, schedules: {} })
+})
+
+// ADR 0002 Ruling H: the `error` frame is dropped, deliberately, until one is
+// reachable. This pins the drop in TWO phases, because the hazard Ruling H
+// defers is an error sent IN PLACE of the snapshot: phase 1 applies every
+// code to a FRESH store, where latching hasSnapshot would turn "loading
+// forever" into a pane reading a snapshot that never came. Phase 2 repeats it
+// after a real snapshot. Both compare CONTENTS against a structuredClone taken
+// beforehand, not just identity: an in-place write with no commit keeps the
+// reference and notifies nobody. When the visible surface is built, this test
+// is expected to be rewritten with it.
+test('an error frame is dropped before and after the snapshot: no state change, no notification', () => {
+  expect(WIRE_ERROR_CODES.length).toBe(4)
+  const store = createStore()
+  let notified = 0
+  store.subscribe(() => { notified += 1 })
+
+  const fresh = store.getSnapshot()
+  const freshCopy = structuredClone(fresh)
+  for (const code of WIRE_ERROR_CODES) {
+    store.apply({ type: 'error', code, message: WIRE_ERROR_MESSAGES[code] })
+  }
+  expect(store.getSnapshot()).toBe(fresh)
+  expect(store.getSnapshot().hasSnapshot).toBe(false)
+  expect(store.getSnapshot()).toEqual(freshCopy)
+  expect(notified).toBe(0)
+
+  store.apply({ type: 'snapshot', providers: { a: { data: { n: 1 }, schedules: {} } } })
+  expect(notified).toBe(1)
+  const before = store.getSnapshot()
+  const beforeCopy = structuredClone(before)
+  for (const code of WIRE_ERROR_CODES) {
+    store.apply({ type: 'error', code, message: WIRE_ERROR_MESSAGES[code] })
+  }
+  expect(store.getSnapshot()).toBe(before)
+  expect(store.getSnapshot()).toEqual(beforeCopy)
+  expect(beforeCopy).toEqual({ connected: false, hasSnapshot: true, providers: { a: { data: { n: 1 }, schedules: {} } } })
+  expect(notified).toBe(1)
 })

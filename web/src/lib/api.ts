@@ -77,7 +77,8 @@ export async function postAction(
  *     at all, so a rejected action produced no evidence ANYWHERE. Ruling E
  *     covers the launcher no-op, not this. The console is the only surface this
  *     signature can reach: `onAction` is typed `void` and the pane holds no
- *     error channel, which is Lens B's M-5/M-6 and belongs to Task 10.
+ *     action-result channel — the same contract gap as Ruling E's exec result
+ *     channel, deferred with it (ADR 0002 Rulings E and H).
  *
  * The `Promise<void>` signature is pinned by the plan and is unchanged.
  */
