@@ -268,6 +268,11 @@ test('a symlink standing in for the hooks directory is refused, not followed', (
   const used = hooksDirUnder(runtimeDir)
   expect(used).not.toBe(join(runtimeDir, 'atrium', 'nohooks'))
   expect(used).not.toBe(elsewhere)
+  // Carry-forward P4. Both assertions above pass VACUOUSLY if the probe child
+  // fails to start: hooksDirUnder() then returns '', which is neither path.
+  // These two make the test fail unless a real, private directory came back.
+  expect(existsSync(used)).toBe(true)
+  expect(statSync(used).mode & 0o022).toBe(0)
 })
 
 test('the hook-free directory is 0700 and owned by us', () => {
