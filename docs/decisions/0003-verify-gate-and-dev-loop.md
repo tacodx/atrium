@@ -153,10 +153,15 @@ Measured at `6281c07` against a source-run server on `127.0.0.1:7444`, all **403
 
 A direct cross-port fetch from a page on 5173 carries both an `Origin` and `Sec-Fetch-Site` — `same-site`
 when the hostnames match, `cross-site` otherwise — and both values are rejected, so **for a direct fetch both
-checks would have to be weakened**. A Vite `server.proxy` trips the Host or Origin check instead. But a proxy
-that rewrites `Host`, strips `Origin` and drops `Sec-Fetch-Site` would pass the gate with **no gate.ts edit at
-all** — which is why the prohibition names proxies too, not just edits to gate.ts. The supported loop is the
-~1.5 s rebuild in (c).
+checks would have to be weakened**. A Vite `server.proxy` is different, and worse. In its usual copy-paste
+form, `changeOrigin: true`, the proxy rewrites `Host` to the target's, so the Host check passes. The page and
+the proxied path are then both on 5173, so a GET from the page is same-origin: the browser sends no `Origin`
+and `Sec-Fetch-Site: same-origin`, which `src/server/gate.ts:34` allows. **Every GET through such a proxy
+passes the gate**, with no gate.ts edit at all; only requests that carry an `Origin` (a POST, for one) are
+still rejected, by the origin allowlist. (Without `changeOrigin`, the forwarded `Host: localhost:5173` trips
+the Host check, as in the table.) So the read side of the gate is defeated by proxy configuration alone,
+and **the prohibition must cover proxy configuration** — a `server.proxy` entry, in any form — not only
+edits to gate.ts. The supported loop is the ~1.5 s rebuild in (c).
 
 `scripts/assert-package.ts` uses `fetch`, never a browser, so it can structurally never observe a CSP
 violation. That is why ADR 0002 Ruling D (Tailwind classes only, no `style={{}}`) is a ruling rather than a
