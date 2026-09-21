@@ -12,7 +12,8 @@
     "build": "bun run build:web && bun run build:server",
     "test": "bun test",
     "typecheck": "bun run scripts/gen-assets.ts --allow-empty && tsc --noEmit",
-    "assert:package": "bun run scripts/assert-package.ts ./atrium ./web-dist"
+    "assert:package": "bun run scripts/assert-package.ts ./atrium ./web-dist",
+    "verify": "bun run build && bun run assert:package && bun run test && bun run typecheck"
   },
   "dependencies": {
     "react": "^19.3.0",
