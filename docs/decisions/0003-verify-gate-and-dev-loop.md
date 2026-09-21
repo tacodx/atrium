@@ -50,7 +50,12 @@ deleted, the decoy run prints `packaging ok: 3 of 3 assets embedded…` — the 
 reproduced. The exit check: a stub that exits at once with nothing on 7444; the run must fail with
 `exited (code 1) before it could be tested`. (Fix round F1: the first version had one test, whose stub
 exited, asserting only `foreign listener` — a substring the exit check's message also carries, so it stayed
-green with the pid check deleted. Deleting either check alone now reddens only its own test.)
+green with the pid check deleted. Deleting either check alone now reddens only its own test.) A third test
+runs the measured scenario itself — a stub that exits 1 while a convincing decoy answers on 7442 — and
+asserts only the outcome: a non-zero exit and no `packaging ok` on stdout, with no message substring. (Fix
+round 2: after F1's split nothing ran that scenario, and making the pid check stand down once the child had
+exited and the exit check stand down once something had answered kept both isolated tests green while the
+scenario printed `packaging ok`.)
 
 **Correction to the plan.** The plan warned that a dev server left on 7373 makes the gate fail with
 `binary never started listening within 5s`. Measured by the pre-flight at 5f15053, that was wrong: with a
@@ -64,11 +69,28 @@ run embeds nothing), and with a compiled one it passed. After this task, both ca
 handoff file found — is the server running?") while the server was running. The child now gets temp `HOME`,
 `XDG_CONFIG_HOME` and `XDG_RUNTIME_DIR`, removed in the `finally` after the child is killed and reaped. After
 the fix, the same measurement leaves both files intact and `open --print-url` exits 0. Every other source-run
-`serve` spawn in the suite got a temp `HOME` in the same pass, and a structural test requires all ten to
-stay that way. It resolves a property of a helper's return value against the object literal the helper
-actually returns (fix round F2: `HOME: env.HOME!`, a key `scratchConfig` never sets, used to pass), and
-cross-checks its strict `Bun.spawn([… 'serve' …])` matcher against a loose per-file count of quoted `'serve'`
-literals, so a spawn in a shape the matcher cannot see makes the two disagree.
+`serve` spawn in the suite got a temp `HOME` in the same pass, and a structural test in
+`test/verify-gate.test.ts` checks all ten.
+
+**What that structural test catches, and what it is not.** It walks the TypeScript AST of `test/` and
+`scripts/`. Its strict matcher finds `Bun.spawn` / `Bun.spawnSync` calls whose first argument is an array
+literal with a `'serve'` element, and pins their number at ten. For each one it resolves `env` (an inline
+object literal, a shorthand `env`, or an identifier bound to an object literal) and requires `HOME`,
+`XDG_RUNTIME_DIR` and `XDG_CONFIG_HOME` each to be set after the last spread to one of: a `mkdtempSync(…)`
+call, a `const` chained to one, a call to a top-level helper in the same file that returns such a value on
+every path (a body that can run off its end fails), or a property of such a helper's returned object literal
+that is set from one (`scratchConfig(…).XDG_CONFIG_HOME`). Those are the shapes this repo uses. The loose
+count is a separate, cruder scan: every `Bun.spawn` / `Bun.spawnSync` call whose source text contains the word
+`serve`, plus every quoted `'serve'` outside such a call. It must equal the strict matches file by file. It
+exists so that a *new* spawn shape — argv built in a variable, spread from a split string, a `sh -c` line —
+makes the two counts disagree loudly instead of passing unseen.
+
+This is a tripwire for the shapes in the tree, not a proof of hermeticity: a determined author can always
+write a server spawn a static scan does not see. From fix round 2 on, a finding of the form "the analysis
+misses yet another spawn or helper shape" is recorded as a known limitation, not fixed, unless that shape
+already exists in the repo. A coverage regression, a hole in a pin that is not part of the analyzer (the
+chain, the stages, CI, the bun pin, assert-package's own-child checks), or a shape present in the tree still
+gets fixed.
 
 ## (b) The CI pin
 
@@ -80,6 +102,8 @@ either of which would let a red `verify` pass the job. Since fix round F4 it als
 `pull_request:` triggers under `on:` (so CI cannot quietly become manual-only), and exactly one
 `oven-sh/setup-bun` and one `bun-version` (a second, unpinned setup-bun step would otherwise override the pin).
 Since F3, `typecheck` must contain `tsc --noEmit` and `build` must run both `build:web` and `build:server`.
+Since fix round 2, `tsc --noEmit` must also be `typecheck`'s last command, with no `||`, `;` or lone `&` in the
+script: `… tsc --noEmit || true` had printed TS2322 and exited 0.
 
 **Deviation from the plan: `actions/checkout@v5`, not `@v4`.** `actions/checkout@v4`'s `action.yml` declares
 `using: node20`; GitHub's changelog "Deprecation of Node 20 on GitHub Actions runners" (2025-09-19,
