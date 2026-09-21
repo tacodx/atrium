@@ -1,6 +1,6 @@
 import { SESSION_PATH, STATE_PATH } from '../../../src/core/wire'
 import type { WireSnapshot } from '../../../src/core/wire'
-import { TOKEN_STORAGE_KEY } from './session'
+import { TOKEN_STORAGE_KEY } from './storage-keys'
 
 // Three same-origin fetch helpers. Every path is relative, the token travels
 // in the Authorization header and NEVER in a URL (§8.3). A same-origin browser
@@ -54,8 +54,9 @@ export async function postAction(
  * a cross-task interface gap rather than patched by widening the signature.
  *
  * The token is therefore read from storage AT CALL TIME. TOKEN_STORAGE_KEY is
- * imported from ./session rather than re-spelled: two copies of a storage key
- * is how a signed-in page starts reading an empty slot. The read lives inside
+ * imported from ./storage-keys (the leaf both this file and ./session use,
+ * review M-4) rather than re-spelled: two copies of a storage key is how a
+ * signed-in page starts reading an empty slot. The read lives inside
  * the body, so this module still has no module-scope browser access (see the
  * note at the top of this file) and stays importable under `bun test`.
  *

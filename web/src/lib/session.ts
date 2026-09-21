@@ -1,4 +1,5 @@
 import { redeemHandoff } from './api'
+import { TOKEN_STORAGE_KEY } from './storage-keys'
 
 // Token acquisition. Pure logic behind an injected-deps interface: no
 // module-scope access to window, document, localStorage, location or history
@@ -6,7 +7,8 @@ import { redeemHandoff } from './api'
 // which only main.tsx calls — so this module is importable under `bun test`
 // with no DOM (test/client-wire.test.ts tests 9-11).
 
-export const TOKEN_STORAGE_KEY = 'atrium.token'
+// Re-exported so existing importers (test/client-wire.test.ts) keep one path.
+export { TOKEN_STORAGE_KEY }
 // The mint produces 43 base64url characters from 32 random bytes; the range
 // is deliberately wider than 43 so a future token length is not a client
 // change. Anything outside it is never sent to the server (test 11, M15).
