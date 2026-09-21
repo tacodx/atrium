@@ -107,6 +107,35 @@ test('CI pins bun to the engines floor', () => {
   expect(workflow.match(/bun-version/g) ?? []).toHaveLength(1)
 })
 
+// Fix round 3, item B3: the CI tests above are regexes over text, and each
+// round found YAML they never looked at — a step-level `shell: bash {0}` (which
+// drops -e/pipefail), a second setup-bun step spelled with YAML escapes
+// ("oven-sh\/setup-bun", "bun\x2dversion") that no substring count sees. They
+// stay for their messages; the whole file is pinned exactly here. Only a
+// trailing newline is normalised. Deliberate friction: any edit to ci.yml
+// fails here until this literal is updated in the same commit.
+const CI_YML = [
+  'name: verify',
+  'on:',
+  '  push:',
+  "    branches: ['**']",
+  '  pull_request:',
+  'jobs:',
+  '  verify:',
+  '    runs-on: ubuntu-latest',
+  '    steps:',
+  '      - uses: actions/checkout@v5',
+  '      - uses: oven-sh/setup-bun@v2',
+  '        with:',
+  '          bun-version: 1.3.11',
+  '      - run: bun install --frozen-lockfile',
+  '      - run: bun run verify',
+].join('\n')
+
+test('.github/workflows/ci.yml is exactly the reviewed workflow', () => {
+  expect(workflow.replace(/\n$/, '')).toBe(CI_YML)
+})
+
 // --- Task 10a (7): every server spawn is hermetic. ---
 //
 // A `serve` child that inherits the developer's HOME scans their real home
