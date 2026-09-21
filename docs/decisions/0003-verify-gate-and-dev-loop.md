@@ -55,7 +55,11 @@ runs the measured scenario itself — a stub that exits 1 while a convincing dec
 asserts only the outcome: a non-zero exit and no `packaging ok` on stdout, with no message substring. (Fix
 round 2: after F1's split nothing ran that scenario, and making the pid check stand down once the child had
 exited and the exit check stand down once something had answered kept both isolated tests green while the
-scenario printed `packaging ok`.)
+scenario printed `packaging ok`.) Since fix round 3 that test runs twice, with a stub that exits **0** (on 7445)
+and one that exits 1 (on 7442): a pid check that stands down once the child has exited plus an exit check
+that ignores code 0 kept every test green while an exit-0 stub — a compiled `serve` that falls off the end —
+with a decoy printed `packaging ok`. With the pid test (stub alive) and the exit test (no listener), the stub
+space {alive, exits 0, exits non-zero} × {decoy, none} is covered: a closure, not another rule.
 
 **Correction to the plan.** The plan warned that a dev server left on 7373 makes the gate fail with
 `binary never started listening within 5s`. Measured by the pre-flight at 5f15053, that was wrong: with a
@@ -77,17 +81,33 @@ the fix, the same measurement leaves both files intact and `open --print-url` ex
 literal with a `'serve'` element, and pins their number at ten. For each one it resolves `env` (an inline
 object literal, a shorthand `env`, or an identifier bound to an object literal) and requires `HOME`,
 `XDG_RUNTIME_DIR` and `XDG_CONFIG_HOME` each to be set after the last spread to one of: a `mkdtempSync(…)`
-call, a `const` chained to one, a call to a top-level helper in the same file that returns such a value on
-every path (a body that can run off its end fails), or a property of such a helper's returned object literal
+call, a variable declared with `const`, `let` or `var` whose *initializer* is (or chains to) one — the
+analysis reads the initializer only and never looks for a later reassignment — a call to a top-level helper
+in the same file that returns such a value on every path (a body that can run off its end fails), or a property of such a helper's returned object literal
 that is set from one (`scratchConfig(…).XDG_CONFIG_HOME`). Those are the shapes this repo uses. The loose
 count is a separate, cruder scan: every `Bun.spawn` / `Bun.spawnSync` call whose source text contains the word
 `serve`, plus every quoted `'serve'` outside such a call. It must equal the strict matches file by file. It
 exists so that a *new* spawn shape — argv built in a variable, spread from a split string, a `sh -c` line —
-makes the two counts disagree loudly instead of passing unseen.
+makes the two counts disagree loudly instead of passing unseen. The two scans do not cover the same files:
+the loose count skips `test/verify-gate.test.ts` itself (it names both `serve` and `Bun.spawn`), while the
+strict count includes it and finds nothing there.
 
 This is a tripwire for the shapes in the tree, not a proof of hermeticity: a determined author can always
-write a server spawn a static scan does not see. From fix round 2 on, a finding of the form "the analysis
-misses yet another spawn or helper shape" is recorded as a known limitation, not fixed, unless that shape
+write a server spawn a static scan does not see. Known limitations, recorded and deliberately not fixed:
+
+- **A command string moved out of the call** (`const CMD = 'serve --port 7445'`, passed in by name) is
+  invisible to both scans: the call's text no longer says `serve`, and the string is not exactly `'serve'`.
+- **argv split/joined into a variable** (`const argv = s.split(' ')`) is invisible to the strict matcher and
+  caught, if at all, only by the loose count.
+- **`let` reassignment after a temp-dir initializer** (`let h = mkdtempSync(…); h = homedir()`) passes: the
+  analysis reads the initializer only. Proven by mutation at `test/repos-pane.test.ts`; no such reassignment
+  exists in the tree.
+- **Parameter, `catch` and `for-of` bindings** are not variable statements, so the resolver cannot see them
+  and a value bound that way fails closed (it is never accepted as a temp dir).
+- **The loose count excludes `test/verify-gate.test.ts`**, so a server spawn written into this test file
+  itself is checked by the strict count alone.
+
+From fix round 2 on, a finding of the form "the analysis misses yet another spawn or helper shape" is recorded as a known limitation, not fixed, unless that shape
 already exists in the repo. A coverage regression, a hole in a pin that is not part of the analyzer (the
 chain, the stages, CI, the bun pin, assert-package's own-child checks), or a shape present in the tree still
 gets fixed.
@@ -104,6 +124,19 @@ either of which would let a red `verify` pass the job. Since fix round F4 it als
 Since F3, `typecheck` must contain `tsc --noEmit` and `build` must run both `build:web` and `build:server`.
 Since fix round 2, `tsc --noEmit` must also be `typecheck`'s last command, with no `||`, `;` or lone `&` in the
 script: `… tsc --noEmit || true` had printed TS2322 and exited 0.
+
+**Exact pins, since fix round 3.** Every round of Task 10a found a new way to hollow a script or the
+workflow past a contains/ends-with/regex rule — `vite build || true`, a new `pretest` lifecycle hook, a
+step-level `shell: bash {0}` (which drops `-e`), a second setup-bun step spelled with YAML escapes
+(`"oven-sh\/setup-bun@v2"`, `"bun\x2dversion"`) that no substring count sees. So
+`test/verify-gate.test.ts` now also pins **package.json's whole `scripts` object** with `toEqual` against a
+literal, and **the whole of `.github/workflows/ci.yml`** against a literal (only a trailing newline is
+normalised). Every script in that object is in `verify`'s chain, directly or through a sub-script
+(`gen:assets` via `build:server`), so nothing unrelated is pinned. The shape tests stay: their failure
+messages say *why* each part matters; the exact pins make them un-evadable. **The consequence for a
+maintainer: any edit to `scripts` or to `ci.yml` now fails `verify-gate` until the literal in the test is
+updated in the same commit.** That is deliberate friction, because every round of this task found a new
+way to hollow one of them.
 
 **Deviation from the plan: `actions/checkout@v5`, not `@v4`.** `actions/checkout@v4`'s `action.yml` declares
 `using: node20`; GitHub's changelog "Deprecation of Node 20 on GitHub Actions runners" (2025-09-19,
