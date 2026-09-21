@@ -35,6 +35,15 @@ test('every stage named in verify is a real script', () => {
   // here green, and verify and CI then passed without running tsc or building
   // anything. Read-only pins; this file may not edit the scripts it checks.
   expect(pkg.scripts.typecheck).toContain('tsc --noEmit')
+  // Fix round 2, item C: `… && tsc --noEmit || true` (or `; true`) kept the
+  // line above green while `bun run typecheck` printed TS2322 and exited 0.
+  // tsc must be the last command and nothing may swallow its exit code: no
+  // `||`, no `;`, and no `&` that is not part of `&&`.
+  const typecheck = pkg.scripts.typecheck ?? ''
+  expect(typecheck.trimEnd()).toMatch(/(^|&&\s*)tsc --noEmit$/)
+  expect(typecheck).not.toContain('||')
+  expect(typecheck).not.toContain(';')
+  expect(typecheck.replaceAll('&&', '')).not.toContain('&')
   expect(pkg.scripts.build).toContain('build:web')
   expect(pkg.scripts.build).toContain('build:server')
   expect(pkg.scripts['build:web']).toContain('vite build')
