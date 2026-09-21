@@ -273,33 +273,47 @@ test('a junk message body neither throws out of the listener nor moves the store
 // forever" into a pane reading a snapshot that never came. Phase 2 repeats it
 // after a real snapshot. Both compare CONTENTS against a structuredClone taken
 // beforehand, not just identity: an in-place write with no commit keeps the
-// reference and notifies nobody. When the visible surface is built, this test
-// is expected to be rewritten with it.
+// reference and notifies nobody. Each phase runs on a CONNECTED store, as in
+// production (main.tsx calls setConnected(true) from onOpen before any frame
+// can arrive): on a store that never connected, an error branch that drops
+// the connection is a no-op and this pin could not see it (MUTATIONS M6h
+// `this.setConnected(false)`, M6i a direct `connected: false` commit). When
+// the visible surface is built, this test is expected to be rewritten with it.
 test('an error frame is dropped before and after the snapshot: no state change, no notification', () => {
   expect(WIRE_ERROR_CODES.length).toBe(4)
+
+  // Phase 1: connected, no snapshot yet.
+  const fresh = createStore()
+  fresh.setConnected(true)
+  let freshNotified = 0
+  fresh.subscribe(() => { freshNotified += 1 })
+  const s0 = fresh.getSnapshot()
+  const s0Copy = structuredClone(s0)
+  expect(s0Copy).toEqual({ connected: true, hasSnapshot: false, providers: {} })
+  for (const code of WIRE_ERROR_CODES) {
+    fresh.apply({ type: 'error', code, message: WIRE_ERROR_MESSAGES[code] })
+  }
+  expect(fresh.getSnapshot()).toBe(s0)
+  expect(fresh.getSnapshot().hasSnapshot).toBe(false)
+  expect(fresh.getSnapshot()).toEqual(s0Copy)
+  expect(fresh.getSnapshot()).toEqual({ connected: true, hasSnapshot: false, providers: {} })
+  expect(freshNotified).toBe(0)
+
+  // Phase 2: connected, after a real snapshot.
   const store = createStore()
+  store.setConnected(true)
   let notified = 0
   store.subscribe(() => { notified += 1 })
-
-  const fresh = store.getSnapshot()
-  const freshCopy = structuredClone(fresh)
-  for (const code of WIRE_ERROR_CODES) {
-    store.apply({ type: 'error', code, message: WIRE_ERROR_MESSAGES[code] })
-  }
-  expect(store.getSnapshot()).toBe(fresh)
-  expect(store.getSnapshot().hasSnapshot).toBe(false)
-  expect(store.getSnapshot()).toEqual(freshCopy)
-  expect(notified).toBe(0)
-
   store.apply({ type: 'snapshot', providers: { a: { data: { n: 1 }, schedules: {} } } })
   expect(notified).toBe(1)
   const before = store.getSnapshot()
   const beforeCopy = structuredClone(before)
+  expect(beforeCopy).toEqual({ connected: true, hasSnapshot: true, providers: { a: { data: { n: 1 }, schedules: {} } } })
   for (const code of WIRE_ERROR_CODES) {
     store.apply({ type: 'error', code, message: WIRE_ERROR_MESSAGES[code] })
   }
   expect(store.getSnapshot()).toBe(before)
   expect(store.getSnapshot()).toEqual(beforeCopy)
-  expect(beforeCopy).toEqual({ connected: false, hasSnapshot: true, providers: { a: { data: { n: 1 }, schedules: {} } } })
+  expect(store.getSnapshot()).toEqual({ connected: true, hasSnapshot: true, providers: { a: { data: { n: 1 }, schedules: {} } } })
   expect(notified).toBe(1)
 })
