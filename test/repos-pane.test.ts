@@ -415,7 +415,7 @@ test('clicking an action reports the action id and the repo path', () => {
 })
 
 test('main.tsx still contains the literal p-4 the packaging gate depends on', () => {
-  // Standing guard for scripts/assert-package.ts:119-131, whose Tailwind canary
+  // Standing guard for scripts/assert-package.ts:166-178, whose Tailwind canary
   // is sourced solely from this one class name. Without this test the release
   // gate is the first thing to notice, and it fails with a message blaming a
   // Tailwind configuration problem that does not exist.
