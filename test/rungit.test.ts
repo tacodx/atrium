@@ -1,9 +1,12 @@
-import { test, expect } from 'bun:test'
-import { readFileSync, readdirSync, statSync, existsSync, mkdtempSync, mkdirSync, chmodSync, writeFileSync, symlinkSync } from 'node:fs'
+import { test, expect, afterAll } from 'bun:test'
+import { readFileSync, readdirSync, statSync, existsSync, mkdirSync, chmodSync, writeFileSync, symlinkSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
-import { makeRepo, makeMaliciousRepo, makeSingleVectorRepo, wasPwned } from './fixtures/gitrepo'
+import { makeRepo, makeMaliciousRepo, makeSingleVectorRepo, wasPwned, cleanupFixtures, tempDir } from './fixtures/gitrepo'
 import { runGit, resolveGit, gitEnvFor, emptyHooksDir } from '../src/core/rungit'
+
+// Carry-forward P3: every temp dir below is tracked and drained here.
+afterAll(cleanupFixtures)
 
 test('a hostile repo cannot execute anything through status, diff, or log — and diff still works', async () => {
   const { dir, marker } = makeMaliciousRepo()
@@ -38,9 +41,7 @@ test('a repo path beginning with a dash is not read as a flag', async () => {
 
 test('an empty repo is tolerated, not an error state', async () => {
   const { execFileSync } = await import('node:child_process')
-  const { mkdtempSync } = await import('node:fs')
-  const { tmpdir } = await import('node:os')
-  const dir = mkdtempSync(join(tmpdir(), 'atrium-empty-'))
+  const dir = tempDir('atrium-empty-')
   execFileSync('git', ['init', '-q', '-b', 'main', dir], { env: { PATH: '/usr/bin:/bin', HOME: '/nonexistent' } })
 
   const { code, stderr } = await runGit(dir, ['log', '-1', '--format=%ct'])
@@ -108,7 +109,7 @@ test('vector: a bare .git/hooks/post-index-change fires with zero config entries
 test('runs the git it resolved from PATH, with --no-optional-locks before the subcommand', async () => {
   const realGit = resolveGit()                       // capture before shadowing PATH
   const repo = makeRepo()                            // build the fixture with the real one
-  const dir = mkdtempSync(join(tmpdir(), 'atrium-fakegit-'))
+  const dir = tempDir('atrium-fakegit-')
   const log = join(dir, 'argv')
   writeFileSync(
     join(dir, 'git'),
@@ -147,7 +148,7 @@ test('runs the git it resolved from PATH, with --no-optional-locks before the su
 test('a timed-out git is reported as timedOut, not as a bare exit 1 indistinguishable from a real miss', async () => {
   const sleepBin = Bun.which('sleep')
   expect(sleepBin).not.toBeNull()          // no vacuous pass if the shim cannot block
-  const dir = mkdtempSync(join(tmpdir(), 'atrium-slowgit-'))
+  const dir = tempDir('atrium-slowgit-')
   writeFileSync(join(dir, 'git'), `#!/bin/sh\nexec ${sleepBin} 5\n`, { mode: 0o755 })
 
   const timed = await (async () => {
@@ -176,7 +177,7 @@ test('a timed-out git is reported as timedOut, not as a bare exit 1 indistinguis
 // process that will die exactly the same way every time. No timing dependency
 // here: the shim kills itself immediately (measured ~11ms).
 test('a crashed git is NOT a timeout: killed by an external signal, same exit code, timedOut false', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'atrium-crashgit-'))
+  const dir = tempDir('atrium-crashgit-')
   writeFileSync(join(dir, 'git'), '#!/bin/sh\nkill -9 $$\n', { mode: 0o755 })
 
   const crashed = await (async () => {
@@ -206,7 +207,7 @@ test('gitEnvFor stays a from-scratch allowlist, with PATH derived from the binar
 
 test('resolveGit searches the PATH it is given, not a fixed FHS location', () => {
   const realGit = resolveGit()
-  const dir = mkdtempSync(join(tmpdir(), 'atrium-whichgit-'))
+  const dir = tempDir('atrium-whichgit-')
   symlinkSync(realGit, join(dir, 'git'))
   expect(resolveGit(dir)).toBe(join(dir, 'git'))
   expect(dirname(resolveGit(dir))).not.toBe('/usr/bin')
@@ -218,7 +219,7 @@ test('resolveGit searches the PATH it is given, not a fixed FHS location', () =>
 // real child processes, because "stable across process starts" is not a claim
 // a single process can make about itself.
 test('the hook-free directory is one stable per-user path, not one per process start', () => {
-  const script = join(mkdtempSync(join(tmpdir(), 'atrium-hooksdir-')), 'probe.ts')
+  const script = join(tempDir('atrium-hooksdir-'), 'probe.ts')
   writeFileSync(script, `import { emptyHooksDir } from '${join(process.cwd(), 'src/core/rungit.ts')}'\nconsole.log(emptyHooksDir())\n`)
   const probe = () => {
     const r = Bun.spawnSync([process.execPath, 'run', script])
@@ -241,14 +242,17 @@ test('the hook-free directory is one stable per-user path, not one per process s
 // check reads the environment and memoises, so one process cannot exercise
 // both outcomes.
 function hooksDirUnder(runtimeDir: string): string {
-  const script = join(mkdtempSync(join(tmpdir(), 'atrium-probe-')), 'probe.ts')
+  const probeDir = tempDir('atrium-probe-')
+  const script = join(probeDir, 'probe.ts')
   writeFileSync(script, `import { emptyHooksDir } from '${join(process.cwd(), 'src/core/rungit.ts')}'\nconsole.log(emptyHooksDir())\n`)
-  const r = Bun.spawnSync([process.execPath, 'run', script], { env: { ...process.env, XDG_RUNTIME_DIR: runtimeDir } })
+  // TMPDIR too: the refusal's mkdtemp fallback then lands inside a tracked dir
+  // instead of leaking one atrium-nohooks-XXXXXX per case (P3).
+  const r = Bun.spawnSync([process.execPath, 'run', script], { env: { ...process.env, XDG_RUNTIME_DIR: runtimeDir, TMPDIR: probeDir } })
   return new TextDecoder().decode(r.stdout).trim()
 }
 
 test('a group- or world-writable hooks directory is refused, not used', () => {
-  const runtimeDir = mkdtempSync(join(tmpdir(), 'atrium-hijack-'))
+  const runtimeDir = tempDir('atrium-hijack-')
   const hijacked = join(runtimeDir, 'atrium', 'nohooks')
   mkdirSync(hijacked, { recursive: true })
   chmodSync(hijacked, 0o777)                       // what a pre-creating attacker leaves
@@ -260,8 +264,8 @@ test('a group- or world-writable hooks directory is refused, not used', () => {
 })
 
 test('a symlink standing in for the hooks directory is refused, not followed', () => {
-  const runtimeDir = mkdtempSync(join(tmpdir(), 'atrium-symlink-'))
-  const elsewhere = mkdtempSync(join(tmpdir(), 'atrium-elsewhere-'))
+  const runtimeDir = tempDir('atrium-symlink-')
+  const elsewhere = tempDir('atrium-elsewhere-')
   mkdirSync(join(runtimeDir, 'atrium'), { recursive: true })
   symlinkSync(elsewhere, join(runtimeDir, 'atrium', 'nohooks'))
 

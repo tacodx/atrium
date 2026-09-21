@@ -24,6 +24,11 @@ export function cleanupFixtures(): void {
   for (const d of created.splice(0)) rmSync(d, { recursive: true, force: true })
 }
 
+/** A bare, tracked temp dir: removed by the same `cleanupFixtures()` drain. */
+export function tempDir(prefix: string): string {
+  return track(mkdtempSync(join(tmpdir(), prefix)))
+}
+
 export function makeRepo(): string {
   const dir = track(mkdtempSync(join(tmpdir(), 'atrium-fix-')))
   execFileSync('git', ['init', '-q', '-b', 'main', dir], { env: CLEAN_ENV })
