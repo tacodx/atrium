@@ -473,7 +473,7 @@ describe('config reaches the server', () => {
           // XDG_RUNTIME_DIR is scoped too: a child that WRONGLY survives config
           // validation would otherwise write endpoint.json into the
           // developer's real runtime dir.
-          env: { ...process.env, XDG_CONFIG_HOME: dir, XDG_RUNTIME_DIR: dir },
+          env: { ...process.env, HOME: dir, XDG_CONFIG_HOME: dir, XDG_RUNTIME_DIR: dir },
           stderr: 'pipe',
         },
       )
@@ -553,7 +553,7 @@ describe('config reaches the server', () => {
 
     const proc = Bun.spawn(
       [process.execPath, 'run', 'src/index.ts', 'serve'],          // deliberately NO --port
-      { env: { ...process.env, XDG_CONFIG_HOME: dir, XDG_RUNTIME_DIR: dir }, stderr: 'pipe', stdout: 'pipe' },
+      { env: { ...process.env, HOME: dir, XDG_CONFIG_HOME: dir, XDG_RUNTIME_DIR: dir }, stderr: 'pipe', stdout: 'pipe' },
     )
     try {
       const written = await waitForEndpoint(dir)
@@ -577,7 +577,7 @@ describe('config reaches the server', () => {
 
     const proc = Bun.spawn(
       [process.execPath, 'run', 'src/index.ts', 'serve', '--port', '7426'],
-      { env: { ...process.env, XDG_CONFIG_HOME: dir, XDG_RUNTIME_DIR: dir }, stderr: 'pipe', stdout: 'pipe' },
+      { env: { ...process.env, HOME: dir, XDG_CONFIG_HOME: dir, XDG_RUNTIME_DIR: dir }, stderr: 'pipe', stdout: 'pipe' },
     )
     try {
       const written = await waitForEndpoint(dir)
@@ -602,7 +602,7 @@ describe('config reaches the server', () => {
 
     const proc = Bun.spawn(
       [process.execPath, 'run', 'src/index.ts', 'serve'],          // deliberately NO --port
-      { env: { ...process.env, XDG_CONFIG_HOME: dir, XDG_RUNTIME_DIR: dir }, stderr: 'pipe' },
+      { env: { ...process.env, HOME: dir, XDG_CONFIG_HOME: dir, XDG_RUNTIME_DIR: dir }, stderr: 'pipe' },
     )
     // 3s for the same reason as waitForEndpoint above: a 5s race ties with
     // bun's own 5000ms test timeout and loses, so the child is reaped by the

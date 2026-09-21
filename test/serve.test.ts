@@ -78,7 +78,7 @@ test('a port collision exits 78, not a restart loop', async () => {
   // property of the current ordering in startServer, not a rule. Hygiene, no
   // mutation: nothing here reads the runtime dir back.
   const proc = Bun.spawn([process.execPath, 'run', 'src/index.ts', 'serve', '--port', '7394'], {
-    env: { ...process.env, XDG_RUNTIME_DIR: SHARED_RD, XDG_CONFIG_HOME: emptyConfigHome() },
+    env: { ...process.env, HOME: emptyConfigHome(), XDG_RUNTIME_DIR: SHARED_RD, XDG_CONFIG_HOME: emptyConfigHome() },
     stderr: 'pipe',
   })
   const code = await proc.exited
@@ -226,7 +226,7 @@ test('SIGTERM removes endpoint.json on a real signal to a real process', async (
   try {
     const proc = Bun.spawn(
       [process.execPath, 'run', 'src/index.ts', 'serve', '--port', '7402'],
-      { env: { ...process.env, XDG_RUNTIME_DIR: scratch, XDG_CONFIG_HOME: emptyConfigHome() }, stderr: 'pipe', stdout: 'pipe' },
+      { env: { ...process.env, HOME: emptyConfigHome(), XDG_RUNTIME_DIR: scratch, XDG_CONFIG_HOME: emptyConfigHome() }, stderr: 'pipe', stdout: 'pipe' },
     )
     expect(await waitForFile(epPath)).toBe(true)   // server actually started and wrote the file
 
@@ -245,7 +245,7 @@ test('SIGINT removes endpoint.json on a real signal to a real process', async ()
   try {
     const proc = Bun.spawn(
       [process.execPath, 'run', 'src/index.ts', 'serve', '--port', '7403'],
-      { env: { ...process.env, XDG_RUNTIME_DIR: scratch, XDG_CONFIG_HOME: emptyConfigHome() }, stderr: 'pipe', stdout: 'pipe' },
+      { env: { ...process.env, HOME: emptyConfigHome(), XDG_RUNTIME_DIR: scratch, XDG_CONFIG_HOME: emptyConfigHome() }, stderr: 'pipe', stdout: 'pipe' },
     )
     expect(await waitForFile(epPath)).toBe(true)
 
@@ -586,7 +586,7 @@ test('stop() removes handoff.json as well as endpoint.json', async () => {
 test('atrium open --print-url prints the boot handoff from the file and does not mint a new one', async () => {
   const scratch = runtimeScratch()
   const hp = join(scratch, 'atrium', 'handoff.json')
-  const env = { ...process.env, XDG_RUNTIME_DIR: scratch, XDG_CONFIG_HOME: emptyConfigHome() }
+  const env = { ...process.env, HOME: emptyConfigHome(), XDG_RUNTIME_DIR: scratch, XDG_CONFIG_HOME: emptyConfigHome() }
   const proc = Bun.spawn(
     [process.execPath, 'run', 'src/index.ts', 'serve', '--port', '7411'],
     { env, stderr: 'pipe', stdout: 'pipe' },
