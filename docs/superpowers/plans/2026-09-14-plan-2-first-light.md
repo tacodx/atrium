@@ -5703,6 +5703,7 @@ of it is tracked; `ls-files -- ':(literal)a[1]'` returns nothing. The `--` alrea
 option injection and is not the issue; `:(literal)` prefixing is the fix, and it belongs with Task
 8's own pathspec work rather than in a fix round scoped to three files. No test is claimed for it
 here.
+*Correction, 2026-09-21 (Task 10c): `:(literal)` is the fix for rows 2–3 only. Row 4's `check-ignore` refuses pathspec magic (exit 128); the shipped row-4 fix is `check-ignore -q --no-index -- ./rel` (closeout C2, `bade06c`; `src/providers/repos/index.ts:346-354`). Rows 2–3 took `:(literal)` in `71d68ef`.*
 
 **Recorded for Task 10: M11 is reddenable with a shim, just not with a fixture.** The table above
 reports M11 (gate accept → `code !== 128`) as green-both-ways because every fixture-producible gate
@@ -5793,6 +5794,7 @@ fixed messages with `${key}` (an operator-typed key name) as the only interpolat
 a bare pathspec after `--`, where `:(literal)` is the fix. Per the plan's out-of-scope rule and the
 brief's ruling it is NOT fixed here; **carried to Task 10 / a T7 follow-up**. T8's three call shapes
 have no positional at all, so it does not touch the metadata pass.
+*Correction, 2026-09-21 (Task 10c): `:(literal)` is the fix for rows 2–3 only. Row 4's `check-ignore` refuses pathspec magic (exit 128); the shipped row-4 fix is `check-ignore -q --no-index -- ./rel` (closeout C2, `bade06c`; `src/providers/repos/index.ts:346-354`). Rows 2–3 took `:(literal)` in `71d68ef`.*
 
 **Ruling E** appended to `docs/decisions/0002-slice-rulings.md` (`5521e9b`): the no-op is accepted
 as-is for this slice; the consequence is named in one sentence.
