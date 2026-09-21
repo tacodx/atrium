@@ -1,5 +1,5 @@
 import { test, expect, describe, afterAll } from 'bun:test'
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createRegistry } from '../src/core/registry'
@@ -115,10 +115,63 @@ describe('the git chokepoint reaches the action layer', () => {
     expect(() => buildArgv(exec(() => ({ cmd: assembled, args: ['status'] })), {})).toThrow(/runGit/)
   })
 
-  test('lookalike binaries are left alone', () => {
-    for (const cmd of ['/usr/bin/gitk', '/usr/bin/git-crypt', '/usr/bin/legit', '/usr/bin/digit']) {
-      expect(buildArgv(exec(() => ({ cmd, args: [] })), {}).cmd).toBe(cmd)
+  // ADR 0002 Ruling I. The guard used to match only a final segment equal to
+  // the bare binary name, so every other member of the suite passed it. Two
+  // are reachable from a valid repos.* template with no client input
+  // (measured, 2.55.0): `git-receive-pack --advertise-refs <repo>` runs that
+  // repo's core.alternateRefsCommand, and `scalar -C <repo> run fetch` its
+  // core.sshCommand. Ruling I fails closed on the whole suite, so gitk and
+  // git-crypt moved from the allowed side (where 4734d06 had put them without
+  // a recorded rationale) to the refused side. tig and lazygit stay allowed as
+  // a documented limit: no name check can enumerate git frontends.
+  //
+  // `refusedAsGit` demands the guard's OWN message: an unrelated throw (say a
+  // "did not return an argv pair") must not count as a refusal.
+  function refusedAsGit(cmd: string): boolean {
+    try { buildArgv(exec(() => ({ cmd, args: [] })), {}); return false }
+    catch (e) { if (/runGit/.test((e as Error).message)) return true; throw e }
+  }
+
+  // Exact on both sides (design rule 1): every row's verdict is pinned, so a
+  // regex that refuses too little AND one that refuses too much both show.
+  const SUITE_VERDICTS: ReadonlyArray<readonly [string, boolean]> = [
+    // refused: the suite, by name and by path
+    ['git-receive-pack', true], ['git-upload-pack', true], ['git-shell', true],
+    ['git-crypt', true], ['git-absorb', true], ['gitk', true], ['git-gui', true], ['scalar', true],
+    ['/usr/bin/git-receive-pack', true], ['/usr/bin/git-upload-pack', true], ['/usr/bin/git-shell', true],
+    ['/usr/bin/git-crypt', true], ['/usr/bin/gitk', true], ['/usr/bin/scalar', true],
+    ['/usr/libexec/git-core/git-log', true], ['/usr/libexec/git-core/git-status', true],
+    ['/usr/libexec/git-core/scalar', true], ['/usr/lib/git-core/git-diff', true],
+    ['Scalar', true], ['GIT-LOG', true], ['Gitk', true],
+    ['C:\\Program Files\\Git\\mingw64\\libexec\\git-core\\git-log', true],
+    // allowed: near-misses, other tools, and a git-ish DIRECTORY holding a non-git command
+    ['legit', false], ['digit', false], ['gitlab-runner', false], ['github-desktop', false],
+    ['tig', false], ['lazygit', false], ['code', false], ['konsole', false],
+    ['/usr/bin/legit', false], ['/usr/bin/digit', false], ['/usr/bin/gitleaks', false],
+    ['/usr/bin/gitkraken', false], ['/usr/bin/tig', false], ['scalars', false], ['xgit', false],
+    ['gitk2', false], ['/opt/git-2.55/bin/code', false], ['/home/u/src/git/bin/konsole', false],
+  ]
+
+  test('the whole git suite is refused and its near-misses are not — every verdict pinned', () => {
+    expect(SUITE_VERDICTS.map(([cmd]) => [cmd, refusedAsGit(cmd)])).toEqual(SUITE_VERDICTS.map(([c, v]) => [c, v]))
+    for (const [cmd, refused] of SUITE_VERDICTS) {
+      if (!refused) expect(buildArgv(exec(() => ({ cmd, args: [] })), {}).cmd).toBe(cmd)
     }
+  })
+
+  // The live half, restricted to entries named git* or scalar (a wrapper
+  // artifact such as nixpkgs' .git-gui-wrapped is out of scope by name). The
+  // anti-vacuity check stands outside the filter: an empty or unreadable
+  // listing fails the length check instead of passing an empty filter.
+  test('every git* and scalar entry in the installed git exec-path is refused', () => {
+    const r = Bun.spawnSync(['git', '--exec-path'], { stdout: 'pipe', stderr: 'pipe' })
+    expect(r.exitCode).toBe(0)
+    const dir = r.stdout.toString().trim()
+    const files = readdirSync(dir, { withFileTypes: true })
+      .filter((e) => !e.isDirectory() && /^(?:git|scalar)/i.test(e.name))
+      .map((e) => join(dir, e.name))
+    expect(files.length).toBeGreaterThan(50)
+    expect(files.filter((c) => !refusedAsGit(c))).toEqual([])
   })
 
   test('dispatch refuses the exec action rather than spawning it', async () => {

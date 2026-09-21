@@ -563,3 +563,86 @@ the same pass that closes carry-forward P4 — not in Task 9, whose file list is
 and does not include `socket.ts`.
 
 **Revisit if** the handoff ever becomes re-redeemable, or a second credential source is added.
+
+## Ruling I — the exec guard refuses the whole git suite, fail closed. It is a tripwire, not a sandbox
+
+Appended by the Task 10 closeout. It corrects the plan ledger's carry-forward item 1, which named the gap but
+not its reach, and it reverses one pre-existing pin.
+
+### The threat model, stated once
+
+`out.cmd` is operator config (the `repos.editor|terminal|claudeTerminal` templates in
+`~/.config/atrium/config.json`, or their static defaults `code` and `konsole`) or provider code. It is never
+the client — `dispatch` looks the action up by static id and the client's body is only a target matched
+exactly against the discovered table — and never the repository, which controls only the contents of the
+directory the argv is aimed at. `buildArgv`'s guard (`GIT_COMMAND`, `src/core/actions.ts:14`) refuses the git
+suite on the one spawn path with no §8.6 hardening: `spawnDetached` runs with `env: process.env`, no `-c`
+prefix and no env allowlist. It guards a trusted but fallible principal against aiming that path at git. It
+is not a boundary against the operator, who can already set `cmd` to `sh`.
+
+### Why the old guard was not enough — measured
+
+The old guard, `/(?:^|[\\/])git$/i`, refused a final path segment equal to the bare binary name and
+nothing else: of the 178 suite names on this machine (git 2.55.0's 172 exec-path files and 6 on PATH) it
+refused 2. Measured by the pre-flight scout and independently by both challengers, with
+`GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` isolated, a neutral cwd and stdin closed:
+`git-receive-pack --advertise-refs <hostile repo>` executes that repository's `core.alternateRefsCommand`
+(rc 0, marker written). `scalar -C <hostile repo> run fetch` executes its `core.sshCommand` (scout only).
+Both argvs pass `validateTemplate` (`--advertise-refs` and `-C` are dash-leading literals before
+`${path}`), so both are reachable from a valid `repos.*` template with no client input.
+
+### The decision
+
+**Fail closed on the whole suite.** `GIT_COMMAND` is now
+`/(?:^|[\\/])(?:git(?:-[^\\/]*)?|gitk|scalar)$/i`, judged on the final path segment only: basename `git`,
+any basename starting `git-`, `gitk`, `scalar`, case-insensitively.
+
+- Every exec-path helper IS the git binary (Fedora and Ubuntu both symlink them to it) or one of its scripts.
+- Third-party `git-*` tools (git-crypt, git-absorb, git-lfs, git-cola, …) shell back to git inside the
+  target repository — the path the receive-pack measurement exercises.
+- `gitk` and `scalar` are the suite's own tools. The `gitk` refusal is policy, not a measured exploit: it
+  has no `-C`, so a template cannot aim it at a repository; it is refused because it is the suite's.
+
+This **reverses** the pin `'lookalike binaries are left alone'` in `test/actions.test.ts`, which allowed
+`/usr/bin/gitk` and `/usr/bin/git-crypt`. Commit 4734d06 put them there as lookalikes with no recorded threat
+rationale (read by challenger 1). They are now on the refused side; `legit` and `digit` stay allowed, and
+`gitlab-runner`, `github-desktop`, `tig`, `lazygit`, `code` and `konsole` are pinned allowed beside them.
+
+### Pins, by title (not line number)
+
+- `test/actions.test.ts` — "the whole git suite is refused and its near-misses are not — every verdict
+  pinned": a static table of names and paths, each with its exact verdict, both directions compared as one
+  `toEqual`.
+- `test/actions.test.ts` — "every git* and scalar entry in the installed git exec-path is refused": the live
+  half, restricted to basenames starting `git` or `scalar` (unrestricted, a wrapper artifact such as nixpkgs'
+  `.git-gui-wrapped` would turn it red), with an anti-vacuity length check outside the filter.
+- Mutation M0, the old regex restored: both red.
+
+### The limits, as a list — what no check on `out.cmd` can see
+
+1. **Git frontends by another name.** `tig`, `lazygit`, `gitg`, `gitkraken`, `gitleaks`, `delta` — and
+   `code` itself, whose git extension loads the repository — run git with the full environment. No name
+   check can enumerate them. `tig` and `lazygit` stay allowed as a documented limit (Ruling B shape 2).
+2. **Wrappers.** `{cmd: 'env', args: ['git', '-C', '${path}', 'status']}` passes `validateTemplate` and the
+   guard, before and after this ruling (measured). So do `sh -c`, `konsole -e`, `systemd-run`, `nice`,
+   `xargs` and `flatpak-spawn`.
+3. **Aliases.** A symlink under another name (`~/bin/g` → the git binary), a hardlink or a renamed copy.
+   Both `git-log` and `git-receive-pack` realpath to `/usr/bin/git` (measured), so a realpath layer would
+   catch symlinks; it is not added (it makes `buildArgv` do I/O, adds a check/use window, and still misses
+   hardlinks and copies).
+4. **The shipped defaults.** `open-terminal` and `open-claude` open a terminal or `claude` in the target
+   repository, where the operator's own shell prompt (a git-aware prompt runs `git status`) and tools run git
+   unhardened. The guard cannot see this by construction; the action exists to put the operator there.
+5. **Arguments are not scanned.** Both regexes match an args value like `/home/u/src/git`; an args scan would
+   refuse "Open in editor" on a checkout of git.git itself.
+6. **Minor, unpinned.** A `.exe` suffix is not matched (Linux-only; systemd-run launcher). Narrowing the
+   suffix class `[^\\/]*` to `[^/]*` is caught by no test; only a backslash-path lookalike would show it.
+
+### Side correction
+
+The comment beside `buildArgv` said `<cwd>` is `/` under systemd. It is atrium's own working directory:
+`$HOME` by default for a user unit (`man systemd.exec`, `WorkingDirectory=`), and a `systemd-run --scope`
+child inherits it (measured: `/bin/pwd` under `--scope` prints the caller's cwd). Comment only, line count
+unchanged so the citations above hold.
+
+**Revisit if** a realpath layer is proposed, or an exec action ever needs a git-suite tool deliberately.

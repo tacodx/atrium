@@ -3,15 +3,15 @@ import type { Action } from './contract'
 import type { Registry } from './registry'
 
 /**
- * Matches the version-control binary as a command: the bare name on its own,
- * or any path whose final segment is that name.
- *
- * Written as a regex rather than a string comparison on purpose. The tripwire
- * in test/rungit.test.ts now flags a QUOTED git literal anywhere under src/,
- * so the guard below cannot spell its own subject in a string — and this
- * comment cannot either, which is the tripwire working as intended.
+ * Matches the version-control SUITE as a command, on the final path segment
+ * only: the binary, any git-* name (exec-path helpers ARE that binary or its
+ * scripts; third-party git-* tools shell back to it), gitk and scalar.
+ * Measured: git-receive-pack and scalar -C run a hostile repo's config from a
+ * valid repos.* template. A tripwire, not a sandbox (ADR 0002 Ruling I lists
+ * what it cannot see). A regex, not a string compare: rungit.test.ts flags a
+ * QUOTED git literal under src/, so this guard and comment never quote it.
  */
-const GIT_COMMAND = /(?:^|[\\/])git$/i
+const GIT_COMMAND = /(?:^|[\\/])(?:git(?:-[^\\/]*)?|gitk|scalar)$/i
 
 /**
  * execFile-style argv (cmd + args[]) with NO shell — necessary everywhere, and
@@ -21,10 +21,10 @@ const GIT_COMMAND = /(?:^|[\\/])git$/i
  * The argv is returned EXACTLY as the action declared it. An earlier version
  * rewrote every dash-leading argument through `resolve()`, which silently
  * mangled any literal flag an action declared — including spec §8.8's own
- * editor example, `code --wait <file>`, which became
- * `code <cwd>/--wait <file>` (and `<cwd>` is `/` under systemd). It failed
- * with no error and no log, and left a provider author with no way to declare
- * a flag at all.
+ * editor example, `code --wait <file>`, which became `code <cwd>/--wait
+ * <file>`, <cwd> being atrium's own working directory (not `/`: $HOME by
+ * default under a user unit, and a --scope child inherits it). It failed with
+ * no error and no log, and left a provider author no way to declare a flag.
  *
  * The guard was also the wrong shape for the threat. An argv array already
  * makes `-rf` inert as a shell token, because there is no shell. The real
@@ -48,7 +48,7 @@ export function buildArgv(action: Action, target: unknown): { cmd: string; args:
   // The runtime half of "runGit is the only path to git" (§8.6). An exec
   // action reaches spawnDetached with NO hardening prefix, NO env allowlist
   // and the full process.env — i.e. a hostile repo's core.fsmonitor executes —
-  // so the one thing an exec action may never be is the git binary. The static
+  // so the one thing an exec action may never be is the git suite. The static
   // half is the tripwire in test/rungit.test.ts; this layer also catches a
   // command name assembled at runtime, which no static scan can see.
   if (GIT_COMMAND.test(out.cmd)) {
