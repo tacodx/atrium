@@ -1,7 +1,7 @@
 import { test, expect } from 'bun:test'
 import { accessSync, constants, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, relative } from 'node:path'
+import { dirname, join, relative, resolve } from 'node:path'
 import * as ts from 'typescript'
 import { spawnDetached } from '../src/core/actions'
 import { INERT_LAUNCHER } from './fixtures/launcher'
@@ -20,6 +20,11 @@ import { INERT_LAUNCHER } from './fixtures/launcher'
 //    Reflect.apply is invisible; aliased imports are caught below;
 //  - options built elsewhere and passed by name fail closed (flagged as
 //    <not-inline>), never silently pass;
+//  - INERT_LAUNCHER is pinned by its text AND its binding: every file with
+//    an INERT_LAUNCHER site must bind the name exactly once, by a plain value
+//    import from test/fixtures/launcher (with or without .ts), and nowhere
+//    else — no local const, parameter, function, class, destructuring or
+//    aliased import may shadow it (a local const undefined once did);
 //  - a named fake is pinned by its TEXT, so what the local binding holds is
 //    taken on trust (each one is a sandbox script or a path inside one);
 //  - handleRoute -> dispatch (src/server/routes.ts) passes no launcher by
@@ -52,9 +57,45 @@ function launcherOf(opts: ts.Expression | undefined, sf: ts.SourceFile): string 
   return found.length === 0 ? '<missing>' : found.join(' + ')
 }
 
-function scan(): { sites: string[]; aliased: string[] } {
+const INERT = 'INERT_LAUNCHER'
+const LAUNCHER_MODULE = join(ROOT, 'test', 'fixtures', 'launcher')
+const THE_IMPORT = 'import { INERT_LAUNCHER } from test/fixtures/launcher'
+
+/**
+ * Every declaration in `sf` that BINDS the name INERT_LAUNCHER, rendered. The
+ * one allowed form renders as THE_IMPORT; anything else renders as its syntax
+ * kind and line, so a shadow is named in the failure.
+ */
+function inertBindings(sf: ts.SourceFile, file: string): string[] {
+  const out: string[] = []
+  const at = (n: ts.Node) => `${ts.SyntaxKind[n.kind]}:${sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1}`
+  const visit = (n: ts.Node): void => {
+    if (ts.isIdentifier(n) && n.text === INERT) {
+      const p = n.parent
+      if (ts.isImportSpecifier(p) && p.name === n) {
+        const decl = p.parent.parent.parent
+        const spec = ts.isStringLiteral(decl.moduleSpecifier) ? decl.moduleSpecifier.text : ''
+        const target = resolve(dirname(file), spec).replace(/\.ts$/, '')
+        const plain = (p.propertyName === undefined || p.propertyName.text === INERT)
+          && !p.isTypeOnly && !p.parent.parent.isTypeOnly && spec.startsWith('.') && target === LAUNCHER_MODULE
+        out.push(plain ? THE_IMPORT : `${at(p)} from '${spec}'`)
+      } else if ((ts.isVariableDeclaration(p) || ts.isParameter(p) || ts.isBindingElement(p)
+        || ts.isFunctionDeclaration(p) || ts.isFunctionExpression(p) || ts.isClassDeclaration(p)
+        || ts.isClassExpression(p) || ts.isEnumDeclaration(p) || ts.isModuleDeclaration(p)
+        || ts.isImportClause(p) || ts.isNamespaceImport(p) || ts.isImportEqualsDeclaration(p)) && p.name === n) {
+        out.push(at(p))
+      }
+    }
+    ts.forEachChild(n, visit)
+  }
+  visit(sf)
+  return out
+}
+
+function scan(): { sites: string[]; aliased: string[]; bindings: Record<string, string[]> } {
   const sites: string[] = []
   const aliased: string[] = []
+  const bindings: Record<string, string[]> = {}
   for (const file of tsFilesUnder(join(ROOT, 'test'))) {
     const sf = ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, true)
     const where = relative(ROOT, file)
@@ -72,8 +113,9 @@ function scan(): { sites: string[]; aliased: string[] } {
       ts.forEachChild(n, visit)
     }
     visit(sf)
+    bindings[where] = inertBindings(sf, file)
   }
-  return { sites: sites.sort(), aliased }
+  return { sites: sites.sort(), aliased, bindings }
 }
 
 // EXACT, by value (design rule 4: `launcher: undefined` passes a key-presence
@@ -98,6 +140,44 @@ test('every dispatch( and spawnDetached( in test/ passes an inert or named-fake 
   expect(aliased).toEqual([])
   expect(sites.filter((s) => / dispatch /.test(s))).toHaveLength(13)
   expect(sites.filter((s) => / spawnDetached /.test(s))).toHaveLength(6)
+})
+
+// The pin above reads the initializer's TEXT; this pins what that text is
+// bound to. MUTATION: replace repos-metadata.test.ts's import with
+// `const INERT_LAUNCHER: string | undefined = undefined` — the site text is
+// unchanged, and all five repos dispatches would pass undefined.
+test('every file with an INERT_LAUNCHER site binds it once, by import from test/fixtures/launcher', () => {
+  const { sites, bindings } = scan()
+  const files = [...new Set(sites.filter((s) => s.endsWith(` ${INERT}`)).map((s) => s.split(' ')[0]!))].sort()
+  // Anti-vacuity: the files that really carry INERT_LAUNCHER sites.
+  expect(files).toEqual(['test/actions.test.ts', 'test/launcher-pin.test.ts', 'test/repos-metadata.test.ts'])
+  expect(Object.fromEntries(files.map((f) => [f, bindings[f]]))).toEqual(Object.fromEntries(files.map((f) => [f, [THE_IMPORT]])))
+})
+
+// The binding scan itself sees every shadowing form, and accepts only the plain import.
+test('the INERT_LAUNCHER binding scan names every shadowing form', () => {
+  const file = join(ROOT, 'test', 'probe.test.ts')
+  const kinds = (src: string) => inertBindings(ts.createSourceFile(file, src, ts.ScriptTarget.Latest, true), file)
+    .map((b) => b.replace(/:\d+.*$/, ''))
+  expect(kinds("import { INERT_LAUNCHER } from './fixtures/launcher'")).toEqual([THE_IMPORT])
+  expect(kinds("import { INERT_LAUNCHER } from './fixtures/launcher.ts'")).toEqual([THE_IMPORT])
+  expect(kinds("import { INERT_LAUNCHER } from '../test/fixtures/launcher'")).toEqual([THE_IMPORT])
+  expect(kinds("import { INERT_LAUNCHER } from './fixtures/other'")).toEqual(['ImportSpecifier'])
+  expect(kinds("import { X as INERT_LAUNCHER } from './fixtures/launcher'")).toEqual(['ImportSpecifier'])
+  expect(kinds("import type { INERT_LAUNCHER } from './fixtures/launcher'")).toEqual(['ImportSpecifier'])
+  expect(kinds("import { type INERT_LAUNCHER } from './fixtures/launcher'")).toEqual(['ImportSpecifier'])
+  expect(kinds("import INERT_LAUNCHER from './fixtures/launcher'")).toEqual(['ImportClause'])
+  expect(kinds("import * as INERT_LAUNCHER from './fixtures/launcher'")).toEqual(['NamespaceImport'])
+  expect(kinds('const INERT_LAUNCHER: string | undefined = undefined')).toEqual(['VariableDeclaration'])
+  expect(kinds('function f(INERT_LAUNCHER?: string) {}')).toEqual(['Parameter'])
+  expect(kinds('function INERT_LAUNCHER() {}')).toEqual(['FunctionDeclaration'])
+  expect(kinds('class INERT_LAUNCHER {}')).toEqual(['ClassDeclaration'])
+  expect(kinds('const { INERT_LAUNCHER } = o; const [INERT_LAUNCHER] = a')).toEqual(['BindingElement', 'BindingElement'])
+  expect(kinds('const { x: INERT_LAUNCHER } = o')).toEqual(['BindingElement'])
+  expect(kinds('try {} catch (INERT_LAUNCHER) {}')).toEqual(['VariableDeclaration'])
+  expect(kinds('enum INERT_LAUNCHER {}')).toEqual(['EnumDeclaration'])
+  // Uses are not bindings.
+  expect(kinds('f({ launcher: INERT_LAUNCHER }); o.INERT_LAUNCHER; ({ INERT_LAUNCHER: 1 })')).toEqual([])
 })
 
 // The rule above is only as good as the value it demands. An ABSENT launcher
