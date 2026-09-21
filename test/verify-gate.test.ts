@@ -31,6 +31,14 @@ test('every stage named in verify is a real script', () => {
   // Not hollow: a stage that exists but does nothing passes the line above.
   expect(pkg.scripts.test).toBe('bun test')
   expect(pkg.scripts['assert:package']).toContain('scripts/assert-package.ts')
+  // Fix round F3: `"typecheck": "true"` or `"build": "true"` kept every test
+  // here green, and verify and CI then passed without running tsc or building
+  // anything. Read-only pins; this file may not edit the scripts it checks.
+  expect(pkg.scripts.typecheck).toContain('tsc --noEmit')
+  expect(pkg.scripts.build).toContain('build:web')
+  expect(pkg.scripts.build).toContain('build:server')
+  expect(pkg.scripts['build:web']).toContain('vite build')
+  expect(pkg.scripts['build:server']).toContain('bun build --compile')
 })
 
 test('CI runs the verify gate, not a bare test run', () => {
