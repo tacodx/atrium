@@ -3,13 +3,13 @@ import type { Action } from './contract'
 import type { Registry } from './registry'
 
 /**
- * Matches the version-control SUITE as a command, on the final path segment
- * only: the binary, any git-* name (exec-path helpers ARE that binary or its
- * scripts; third-party git-* tools shell back to it), gitk and scalar.
- * Measured: git-receive-pack and scalar -C run a hostile repo's config from a
- * valid repos.* template. A tripwire, not a sandbox (ADR 0002 Ruling I lists
- * what it cannot see). A regex, not a string compare: rungit.test.ts flags a
- * QUOTED git literal under src/, so this guard and comment never quote it.
+ * Matches the version-control SUITE by final path segment: the binary, any
+ * git-* name (an exec-path helper is the binary, most are symlinks to it, or
+ * one of its scripts, or a separate suite program built from the same tree;
+ * third-party git-* tools shell back to it), gitk and scalar. Measured:
+ * git-receive-pack and scalar -C run a hostile repo's config from a valid
+ * repos.* template. A tripwire, not a sandbox (ADR 0002 Ruling I). A regex,
+ * never a string compare: rungit.test.ts flags a QUOTED git literal in src/.
  */
 const GIT_COMMAND = /(?:^|[\\/])(?:git(?:-[^\\/]*)?|gitk|scalar)$/i
 

@@ -641,7 +641,7 @@ Both argvs pass `validateTemplate` (`--advertise-refs` and `-C` are dash-leading
 `/(?:^|[\\/])(?:git(?:-[^\\/]*)?|gitk|scalar)$/i`, judged on the final path segment only: basename `git`,
 any basename starting `git-`, `gitk`, `scalar`, case-insensitively.
 
-- Every exec-path helper IS the git binary (Fedora and Ubuntu both symlink them to it) or one of its scripts.
+- Every exec-path helper is the git binary (most are symlinks to it), one of its scripts, or a separate suite program built from the same tree. Measured on git 2.55.0 (Fedora): `/usr/libexec/git-core` holds 172 non-directory entries, 146 of them symlinks to git; the rest are shell/perl scripts (git-submodule, git-filter-branch, …) and separate programs (git-http-backend, git-http-fetch, git-http-push, git-imap-send, git-remote-http and its ftp/ftps/https aliases, git-shell, scalar, …). None of that changes the rule: each is the suite's own.
 - Third-party `git-*` tools (git-crypt, git-absorb, git-lfs, git-cola, …) shell back to git inside the
   target repository — the path the receive-pack measurement exercises.
 - `gitk` and `scalar` are the suite's own tools. The `gitk` refusal is policy, not a measured exploit: it
