@@ -50,6 +50,27 @@ test('every stage named in verify is a real script', () => {
   expect(pkg.scripts['build:server']).toContain('bun build --compile')
 })
 
+// Fix round 3, item B2: the shape rules above explain WHY each script matters,
+// in their failure messages; this is what makes them un-evadable. Every round
+// of Task 10a found another way to hollow a script past a contains/ends-with
+// rule (`vite build || true`, a `pretest` lifecycle hook, …), so the whole
+// object is pinned exactly. Every entry is in verify's chain, directly or via
+// a sub-script (gen:assets through build:server). Deliberate friction: any
+// edit to package.json's scripts fails here until this literal is updated in
+// the same commit.
+test('package.json scripts are exactly the reviewed verify chain', () => {
+  expect(pkg.scripts).toEqual({
+    'build:web': 'vite build',
+    'gen:assets': 'bun run scripts/gen-assets.ts',
+    'build:server': 'bun run gen:assets && bun build --compile --outfile=atrium src/index.ts',
+    build: 'bun run build:web && bun run build:server',
+    test: 'bun test',
+    typecheck: 'bun run scripts/gen-assets.ts --allow-empty && tsc --noEmit',
+    'assert:package': 'bun run scripts/assert-package.ts ./atrium ./web-dist',
+    verify: 'bun run build && bun run assert:package && bun run test && bun run typecheck',
+  })
+})
+
 test('CI runs the verify gate, not a bare test run', () => {
   const run = workflow.match(/^\s*-\s*run:\s*bun run verify\s*$/m)
   expect(run).not.toBeNull()
