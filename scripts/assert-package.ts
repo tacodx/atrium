@@ -7,6 +7,17 @@ import { tmpdir } from 'node:os'
 // so a relative './atrium' here would ENOENT even on a correctly built binary.
 const BIN = resolve(process.argv[2] ?? './atrium')
 const DIST = process.argv[3] ?? './web-dist'
+// Optional third argument: the port. Default 7373, `atrium serve`'s own
+// default, so `bun run assert:package` is unchanged. It exists so
+// test/verify-gate.test.ts can drive this script against a decoy listener on
+// a port of its own without touching 7373.
+const PORT = Number(process.argv[4] ?? 7373)
+if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
+  console.error(`PACKAGING ASSERTION FAILED: bad port argument ${process.argv[4]}`)
+  process.exit(1)
+}
+const BASE = `http://127.0.0.1:${PORT}`
+const HOST = `127.0.0.1:${PORT}`
 
 function countFiles(dir: string): number {
   let n = 0
@@ -41,40 +52,76 @@ let jsSrc: string | undefined
 // script would then report "binary never started listening within 5s",
 // pointing at DCE and route wiring rather than at the operator's dotfile.
 const configHome = mkdtempSync(join(tmpdir(), 'atrium-assert-config-'))
+// HOME and XDG_RUNTIME_DIR are scoped too (Task 10a). With the operator's
+// runtime dir inherited, this child OVERWROTE endpoint.json and handoff.json of
+// any running atrium (any port) with its own pid and port, and then — killed —
+// DELETED both. Measured: the still-running server was left with neither file,
+// so `atrium open --print-url` exited 69, "no handoff file found — is the
+// server running?", while it was running. HOME because `serve` scans $HOME for
+// repos on start; an absent HOME is not scoping (homedir() falls back to passwd).
+const home = mkdtempSync(join(tmpdir(), 'atrium-assert-home-'))
+const runtimeDir = mkdtempSync(join(tmpdir(), 'atrium-assert-run-'))
+
+// A fatal condition: the checks below cannot be trusted at all, so it is
+// reported on its own rather than alongside the per-asset failures. Thrown
+// inside the try so the `finally` still runs — process.exit() would skip it.
+class Fatal extends Error {}
+let fatal: string | undefined
+let childStderr = ''
+let proc: ReturnType<typeof Bun.spawn> | undefined
 
 try {
-  const proc = Bun.spawn([BIN, 'serve', '--port', '7373'], {
+  proc = Bun.spawn([BIN, 'serve', '--port', String(PORT)], {
     cwd: '/tmp',
-    env: { ...process.env, XDG_CONFIG_HOME: configHome },
+    env: { ...process.env, HOME: home, XDG_CONFIG_HOME: configHome, XDG_RUNTIME_DIR: runtimeDir },
     stdout: 'pipe',
     stderr: 'pipe',
   })
+  const child = proc
+  const stderrText = () => new Response(child.stderr as ReadableStream).text()
 
   // Poll, never sleep a fixed amount: a fixed wait is flaky on a loaded box
   // and slow on an idle one. /healthz needs the `host` header the gate
   // requires (Task 4 wires `checkRequest` in front of every route).
-  let up = false
+  // The port is always probed at least once, even if the child has already
+  // died: a stub that exits instantly must still be reported as "a foreign
+  // listener answered", not merely "exited", when something else is there.
+  let health: Record<string, unknown> | undefined
   for (let i = 0; i < 100; i++) {
     try {
-      await fetch('http://127.0.0.1:7373/healthz', { headers: { host: '127.0.0.1:7373' } })
-      up = true; break
-    } catch { await Bun.sleep(50) }
-  }
-  if (!up) {
-    console.error('PACKAGING ASSERTION FAILED: binary never started listening within 5s')
-    console.error(await new Response(proc.stderr).text())
-    // process.exit() does not run the `finally` below, so restore the parked
-    // dist directory and kill the child here too, or a failed run leaves
-    // web-dist permanently renamed and the child process orphaned.
-    proc.kill()
-    if (existsSync(parked)) renameSync(parked, DIST)
-    rmSync(configHome, { recursive: true, force: true })
-    process.exit(1)
+      health = await (await fetch(`${BASE}/healthz`, { headers: { host: HOST } })).json()
+      break
+    } catch {
+      if (child.exitCode !== null) break
+      await Bun.sleep(50)
+    }
   }
 
-  const health = await (
-    await fetch('http://127.0.0.1:7373/healthz', { headers: { host: '127.0.0.1:7373' } })
-  ).json()
+  // Task 10a: the /healthz above must belong to the child THIS script spawned.
+  // Measured before this check existed: with a healthy atrium already on the
+  // port and ./atrium replaced by a stub that exits 1, this script printed
+  // "packaging ok" and exited 0 — it had tested somebody else's server. Both
+  // halves are needed: the pid match catches a foreign listener that answered
+  // first, and the exit check catches a child that died before (or after)
+  // anyone answered.
+  if (health !== undefined && Number(health.pid) !== child.pid) {
+    childStderr = await Promise.race([stderrText(), Bun.sleep(500).then(() => '')])
+    throw new Fatal(
+      `a foreign listener answered on port ${PORT} (its /healthz pid ${String(health.pid)} is not the ` +
+      `spawned binary's pid ${child.pid}) — this run tested nothing; free the port and re-run`,
+    )
+  }
+  if (child.exitCode !== null) {
+    childStderr = await stderrText()
+    throw new Fatal(
+      `the spawned binary exited (code ${child.exitCode}) before it could be tested` +
+      (health !== undefined ? ` — and a foreign listener answered on port ${PORT}` : ''),
+    )
+  }
+  if (health === undefined) {
+    throw new Fatal('binary never started listening within 5s')
+  }
+
   embedded = Number(health.assets)
   if (embedded < expected) {
     failures.push(`embedded ${embedded} < dist ${expected} — DCE dropped assets`)
@@ -90,7 +137,7 @@ try {
   else if (!execLine.startsWith('/')) failures.push(`execLine is not an absolute path: ${execLine}`)
   else if (!existsSync(execLine)) failures.push(`execLine does not exist on disk: ${execLine}`)
 
-  const html = await fetch('http://127.0.0.1:7373/')
+  const html = await fetch(`${BASE}/`)
   if (html.status !== 200) {
     failures.push(`GET / returned ${html.status}`)
   }
@@ -111,7 +158,7 @@ try {
   if (!cssHref) {
     failures.push('no hashed CSS asset referenced from index.html (href="....css" did not match)')
   } else {
-    const css = await fetch(`http://127.0.0.1:7373${cssHref}`)
+    const css = await fetch(`${BASE}${cssHref}`)
     const text = await css.text()
     if (css.status !== 200) failures.push(`GET ${cssHref} returned ${css.status}`)
     if (css.headers.get('content-type')?.includes('text/css') !== true)
@@ -134,7 +181,7 @@ try {
   if (!jsSrc) {
     failures.push('no hashed JS asset referenced from index.html (src="....js" did not match)')
   } else {
-    const js = await fetch(`http://127.0.0.1:7373${jsSrc}`)
+    const js = await fetch(`${BASE}${jsSrc}`)
     const text = await js.text()
     if (js.status !== 200) failures.push(`GET ${jsSrc} returned ${js.status}`)
     // The CSS branch checked its content-type and this one never did.
@@ -144,10 +191,24 @@ try {
       failures.push('served JS is a development build')
   }
 
-  proc.kill()
+} catch (e) {
+  if (!(e instanceof Fatal)) throw e
+  fatal = e.message
 } finally {
+  // Kill AND reap before removing the child's runtime dir, so the dir is never
+  // deleted under a live process and no orphan is left holding the port.
+  if (proc) {
+    proc.kill()
+    await proc.exited
+  }
   if (existsSync(parked)) renameSync(parked, DIST)
-  rmSync(configHome, { recursive: true, force: true })
+  for (const d of [configHome, home, runtimeDir]) rmSync(d, { recursive: true, force: true })
+}
+
+if (fatal !== undefined) {
+  console.error(`PACKAGING ASSERTION FAILED: ${fatal}`)
+  if (childStderr) console.error(childStderr)
+  process.exit(1)
 }
 
 if (failures.length) {
