@@ -316,18 +316,24 @@ async function classify(
 
   if (parent === undefined) return { kind: 'surface', origin: 'top-level' }
 
-  // `rel` is repository-derived, so it always follows a `--`.
+  // `rel` is repository-derived, so it always follows a `--`. It is also a
+  // directory name straight off the filesystem, and after `--` git still reads
+  // it as a PATHSPEC: a glob over * ? [ and backslash, with magic on a leading
+  // ':'. Measured on git 2.43.0 and 2.55.0: in a parent tracking a plain file
+  // a1, `ls-files -- a[1]` prints a1, and `:x` is looked up as x. So rows 2
+  // and 3 hand ls-files a :(literal) pathspec, never the bare name.
   const rel = relative(parent, entry.path)
+  const literal = `:(literal)${rel}`
 
   // Row 2 — submodule: mode 160000 in the parent's index.
-  const staged = await runGit(parent, ['ls-files', '-s', '--', rel], { timeoutMs })
+  const staged = await runGit(parent, ['ls-files', '-s', '--', literal], { timeoutMs })
   if (staged.timedOut) return { kind: 'drop', reason: 'timed-out' }
   const firstLine = staged.stdout.split('\n')[0] ?? ''
   if (firstLine.split(/\s+/)[0] === '160000') return { kind: 'drop', reason: 'submodule' }
 
   // Row 3 — vendored: tracked by the parent. Gate on OUTPUT, not exit code:
   // ls-files exits 0 whether or not it matched anything.
-  const tracked = await runGit(parent, ['ls-files', '--', rel], { timeoutMs })
+  const tracked = await runGit(parent, ['ls-files', '--', literal], { timeoutMs })
   if (tracked.timedOut) return { kind: 'drop', reason: 'timed-out' }
   if (tracked.stdout.trim() !== '') return { kind: 'drop', reason: 'vendored' }
 

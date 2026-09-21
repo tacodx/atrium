@@ -1,10 +1,10 @@
 import { test, expect, afterAll } from 'bun:test'
-import { realpathSync, symlinkSync, mkdirSync } from 'node:fs'
+import { realpathSync, symlinkSync, mkdirSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import {
   cleanupFixtures, makeScanRoot, makeRepoIn, writeGitignore, addWorktree, addSubmodule,
   breakGitPointer, makeZeroByteGitFile, makeVendoredChild, startMergeConflict,
-  startCherryPickConflict, startRebaseConflict, makeSlowGitShim,
+  startCherryPickConflict, startRebaseConflict, makeSlowGitShim, commitAll,
 } from './fixtures/gitrepo.ts'
 import { resolveGit } from '../src/core/rungit.ts'
 import { reposConfigSchema, type ReposConfig } from '../src/providers/repos/config.ts'
@@ -292,6 +292,62 @@ test('a repo gitignoring deps/ that contains a clone surfaces that clone — the
   const clone = makeRepoIn(app, 'deps/clone')
   const data = await discover(root)
   expect(data.repos.map((r) => [r.path, r.origin])).toEqual([[real(app), 'top-level'], [real(clone), 'container-child']])
+})
+
+// Rows 2 and 3 hand `rel` to git as a pathspec, and a bare pathspec is a GLOB
+// with MAGIC on a leading ':'. Measured on git 2.43.0 and 2.55.0: in a parent
+// tracking a plain file a1, `ls-files -- a[1]` prints a1, and `ls-files -- :x`
+// looks up x. One pin per row per half (glob, magic): a glob-escape in place
+// of :(literal) passes the a[1] pins and fails the :x ones.
+function parentTracking(root: string, file: string): string {
+  const parent = makeRepoIn(root, 'parent')
+  writeFileSync(join(parent, file), 'decoy\n')
+  commitAll(parent, 'decoy')
+  return parent
+}
+
+test('a child in a directory named a[1] is not claimed by a tracked a1 (row 3 is literal)', async () => {
+  const root = makeScanRoot()
+  const parent = parentTracking(root, 'a1')
+  const child = makeRepoIn(parent, 'a[1]')
+  const data = await discover(root)
+  expect(data.repos.map((r) => r.path)).toEqual([real(parent)])
+  expect(data.dropped).toEqual([{ id: repoId(real(child)), path: real(child), name: 'a[1]', reason: 'ambiguous' }])
+})
+
+test('a child in a directory named a[1] is not claimed by a submodule at a1 (row 2 is literal)', async () => {
+  const root = makeScanRoot()
+  const parent = makeRepoIn(root, 'parent')
+  const sub = addSubmodule(parent, makeRepoIn(root, 'lib'), 'a1')
+  const child = makeRepoIn(parent, 'a[1]')
+  const data = await discover(root)
+  expect(names(data.repos)).toEqual(['lib', 'parent'])
+  expect(data.dropped).toEqual([
+    { id: repoId(real(sub)), path: real(sub), name: 'a1', reason: 'submodule' },
+    { id: repoId(real(child)), path: real(child), name: 'a[1]', reason: 'ambiguous' },
+  ])
+})
+
+test('a child in a directory named :x is not claimed by a tracked x (row 3 reads no pathspec magic)', async () => {
+  const root = makeScanRoot()
+  const parent = parentTracking(root, 'x')
+  const child = makeRepoIn(parent, ':x')
+  const data = await discover(root)
+  expect(data.repos.map((r) => r.path)).toEqual([real(parent)])
+  expect(data.dropped).toEqual([{ id: repoId(real(child)), path: real(child), name: ':x', reason: 'ambiguous' }])
+})
+
+test('a child in a directory named :x is not claimed by a submodule at x (row 2 reads no pathspec magic)', async () => {
+  const root = makeScanRoot()
+  const parent = makeRepoIn(root, 'parent')
+  const sub = addSubmodule(parent, makeRepoIn(root, 'lib'), 'x')
+  const child = makeRepoIn(parent, ':x')
+  const data = await discover(root)
+  expect(names(data.repos)).toEqual(['lib', 'parent'])
+  expect(data.dropped).toEqual([
+    { id: repoId(real(child)), path: real(child), name: ':x', reason: 'ambiguous' },
+    { id: repoId(real(sub)), path: real(sub), name: 'x', reason: 'submodule' },
+  ])
 })
 
 test('a candidate whose classification git call times out is reported as timed-out, never as ambiguous', async () => {
