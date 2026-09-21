@@ -134,29 +134,81 @@ function fnDecl(name: string, sf: ts.SourceFile): ts.FunctionDeclaration | undef
   return sf.statements.find((s): s is ts.FunctionDeclaration => ts.isFunctionDeclaration(s) && s.name?.text === name)
 }
 
-function callsMkdtemp(n: ts.Node): boolean {
-  if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === 'mkdtempSync') return true
-  return ts.forEachChild(n, callsMkdtemp) ?? false
+// Every `return` of a function body, not descending into nested functions
+// (their returns are not this function's).
+function returnsOf(body: ts.Node): ts.ReturnStatement[] {
+  const out: ts.ReturnStatement[] = []
+  const visit = (n: ts.Node): void => {
+    if (ts.isReturnStatement(n)) out.push(n)
+    if (ts.isFunctionLike(n)) return
+    ts.forEachChild(n, visit)
+  }
+  ts.forEachChild(body, visit)
+  return out
+}
+
+// The helper a call invokes, if it is a top-level function declaration in
+// this file, with its returned expressions. undefined for anything else, and
+// for a helper with a bare `return;` or no return at all: fail closed.
+function helperReturns(e: ts.Expression, sf: ts.SourceFile): ts.Expression[] | undefined {
+  if (!ts.isCallExpression(e) || !ts.isIdentifier(e.expression)) return undefined
+  const f = fnDecl(e.expression.text, sf)
+  if (f?.body === undefined) return undefined
+  const rets = returnsOf(f.body)
+  if (rets.length === 0 || rets.some((r) => r.expression === undefined)) return undefined
+  return rets.map((r) => r.expression!)
+}
+
+// An identifier chased back through `const x = …` to the expression it holds.
+function resolved(expr: ts.Expression, depth = 0): ts.Expression {
+  const e = unwrap(expr)
+  if (depth > 8 || !ts.isIdentifier(e)) return e
+  const init = declOf(e.text, e)?.initializer
+  return init === undefined ? e : resolved(init, depth + 1)
 }
 
 // Does this expression evaluate to a directory made by mkdtempSync — directly,
-// through a variable, through a helper function that makes one, or through a
-// property of an object such a helper returns (config.test.ts's
-// `scratchConfig(...).XDG_CONFIG_HOME`)?
+// through a variable, through a helper function every one of whose returns is
+// such a directory, or through a property of an object such a helper returns
+// (config.test.ts's `scratchConfig(...).XDG_CONFIG_HOME`)?
+//
+// Fix round F2: the property case used to accept ANY property of a helper
+// that merely called mkdtempSync somewhere. scratchConfig returns only
+// { XDG_CONFIG_HOME }, so `HOME: env.HOME!` was accepted — the value is
+// undefined, Bun omits the key, and the child's homedir() is the real home.
+// The property name is now resolved against the helper's returned object
+// literal(s), and must be set there from a temp-dir value. The direct-call
+// case had the same looseness (`HOME: scratchConfig()` passed an object) and
+// now requires every return to be a temp dir.
 function isTempDir(expr: ts.Expression, sf: ts.SourceFile, depth = 0): boolean {
   if (depth > 8) return false
   const e = unwrap(expr)
   if (ts.isCallExpression(e) && ts.isIdentifier(e.expression)) {
     if (e.expression.text === 'mkdtempSync') return true
-    const f = fnDecl(e.expression.text, sf)
-    return f?.body !== undefined && callsMkdtemp(f.body)
+    const rets = helperReturns(e, sf)
+    return rets !== undefined && rets.every((r) => isTempDir(r, sf, depth + 1))
   }
   if (ts.isIdentifier(e)) {
     const d = declOf(e.text, e)
     return d?.initializer !== undefined && isTempDir(d.initializer, sf, depth + 1)
   }
-  if (ts.isPropertyAccessExpression(e)) return isTempDir(e.expression, sf, depth + 1)
+  if (ts.isPropertyAccessExpression(e)) {
+    const rets = helperReturns(resolved(e.expression), sf)
+    return rets !== undefined && rets.every((r) => propIsTempDir(unwrap(r), e.name.text, sf, depth + 1))
+  }
   return false
+}
+
+// `obj` is an object literal that sets `key`, after any spread, to a temp dir.
+function propIsTempDir(obj: ts.Expression, key: string, sf: ts.SourceFile, depth: number): boolean {
+  if (!ts.isObjectLiteralExpression(obj)) return false
+  const props = [...obj.properties]
+  const lastSpread = props.reduce((acc, p, i) => (ts.isSpreadAssignment(p) ? i : acc), -1)
+  const i = props.findLastIndex((p) => p.name !== undefined && p.name.getText(sf) === key)
+  if (i < 0 || i < lastSpread) return false
+  const p = props[i]!
+  const value = ts.isPropertyAssignment(p) ? p.initializer : ts.isShorthandPropertyAssignment(p) ? p.name : undefined
+  return value !== undefined && isTempDir(value, sf, depth)
 }
 
 function envLiteral(site: Site): ts.ObjectLiteralExpression | undefined {
@@ -185,15 +237,21 @@ const SCOPED = ['HOME', 'XDG_RUNTIME_DIR', 'XDG_CONFIG_HOME']
 function unscopedKeys(site: Site): string[] {
   const env = envLiteral(site)
   if (env === undefined) return ['env (absent or unresolvable)']
-  const props = [...env.properties]
-  const lastSpread = props.reduce((acc, p, i) => (ts.isSpreadAssignment(p) ? i : acc), -1)
-  return SCOPED.filter((key) => {
-    const i = props.findIndex((p) => p.name !== undefined && p.name.getText(site.sf) === key)
-    if (i < 0 || i < lastSpread) return true                // absent, or overridden by a later spread
-    const p = props[i]!
-    const value = ts.isPropertyAssignment(p) ? p.initializer : ts.isShorthandPropertyAssignment(p) ? p.name : undefined
-    return value === undefined || !isTempDir(value, site.sf)
-  })
+  // Absent, overridden by a later spread, or not a temp dir: the same rule a
+  // helper's returned object is held to (the last duplicate key wins, as in JS).
+  return SCOPED.filter((key) => !propIsTempDir(env, key, site.sf, 0))
+}
+
+// One entry per quoted 'serve' string literal, by file: the loose half of the
+// cross-check below.
+function looseServeLiterals(): string[] {
+  const self = join('test', 'verify-gate.test.ts')
+  const out: string[] = []
+  for (const file of [...tsFilesUnder('test'), ...tsFilesUnder('scripts')]) {
+    if (file === self) continue
+    for (const _ of readFileSync(file, 'utf8').matchAll(/(['"])serve\1/g)) out.push(file)
+  }
+  return out.sort()
 }
 
 test('every server spawn scopes HOME, XDG_RUNTIME_DIR and XDG_CONFIG_HOME to a temp dir', () => {
@@ -202,6 +260,15 @@ test('every server spawn scopes HOME, XDG_RUNTIME_DIR and XDG_CONFIG_HOME to a t
   // repos-pane.test.ts x1, scripts/assert-package.ts x1. A matcher that
   // silently stops matching would otherwise pass with nothing to check.
   expect(sites.map((s) => s.where)).toHaveLength(10)
+  // Fix round F2, the anti-vacuity cross-check: the strict matcher above only
+  // sees Bun.spawn([<array literal containing 'serve'>], …). A server spawn in
+  // any other shape — argv built in a variable, spread from a helper — is
+  // invisible to it, and the fixed count stays 10. So also count, deliberately
+  // loosely, every quoted 'serve' string in test/ and scripts/ (this file
+  // excepted: it names the literal itself). A spawn the matcher misses still
+  // has to spell 'serve' somewhere, and the two counts then disagree. A stray
+  // quoted 'serve' that is not a spawn fails this too: fail closed.
+  expect(looseServeLiterals()).toEqual(sites.map((s) => s.where.replace(/:\d+$/, '')).sort())
   const leaks = sites.flatMap((s) => unscopedKeys(s).map((k) => `${s.where}: ${k}`))
   expect(leaks).toEqual([])
 })
