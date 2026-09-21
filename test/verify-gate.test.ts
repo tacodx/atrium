@@ -210,22 +210,57 @@ test('every server spawn scopes HOME, XDG_RUNTIME_DIR and XDG_CONFIG_HOME to a t
 //
 // Measured before the fix: with a healthy atrium already on the port and the
 // binary replaced by a stub that exits 1, the script printed "packaging ok"
-// and exited 0. The decoy below is deliberately CONVINCING — it answers every
-// request the script makes the way a correct build would — so that without the
-// pid/exited check the script really does pass, as it did then. A temp
-// web-dist is used, never the repo's: the script renames the directory it is
-// given. Port 7443 is in 10a's range (7440-7449).
-test('assert:package refuses a /healthz that does not belong to the binary it spawned', async () => {
-  const PORT = 7443
-  const dir = mkdtempSync(join(tmpdir(), 'atrium-t10a-decoy-'))
+// and exited 0. assert-package.ts has two checks against that, and each is
+// pinned by its own test below, each able to fail only for its own reason.
+//
+// Fix round F1: the original single test (stub exits 1, decoy on the port)
+// stayed green with the pid check deleted, because the exit check fired
+// first and ITS message also mentions "a foreign listener". So neither test
+// asserts that shared substring: each asserts a fragment only its own check
+// prints. Measured: deleting only the pid block reddens the first test alone;
+// deleting only the exit block reddens the second alone.
+//
+// A temp web-dist is used, never the repo's: the script renames the directory
+// it is given. Ports 7443 and 7444 are in 10a's range (7440-7449).
+
+const DECOY_HTML = '<!doctype html><link rel="stylesheet" href="/assets/a.css"><script type="module" src="/assets/a.js"></script>'
+
+function scratchDist(prefix: string): { dir: string; dist: string } {
+  const dir = mkdtempSync(join(tmpdir(), prefix))
   const dist = join(dir, 'web-dist')
   mkdirSync(join(dist, 'assets'), { recursive: true })
-  const html = '<!doctype html><link rel="stylesheet" href="/assets/a.css"><script type="module" src="/assets/a.js"></script>'
-  writeFileSync(join(dist, 'index.html'), html)
+  writeFileSync(join(dist, 'index.html'), DECOY_HTML)
   writeFileSync(join(dist, 'assets', 'a.css'), '.p-4{padding:1rem}')
   writeFileSync(join(dist, 'assets', 'a.js'), 'export {}')
+  return { dir, dist }
+}
+
+async function runAssertPackage(stub: string, dist: string, dir: string, port: number) {
+  const proc = Bun.spawn([process.execPath, 'run', 'scripts/assert-package.ts', stub, dist, String(port)], {
+    env: { ...process.env, HOME: dir, XDG_RUNTIME_DIR: dir, XDG_CONFIG_HOME: dir },
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  const code = await Promise.race([proc.exited, Bun.sleep(4000).then(() => 'timeout' as const)])
+  if (code === 'timeout') {
+    proc.kill('SIGKILL')
+    throw new Error(`assert-package.ts was still running after 4s on port ${port}`)
+  }
+  const stdout = await new Response(proc.stdout).text()
+  const stderr = await new Response(proc.stderr).text()
+  return { code, stdout, stderr }
+}
+
+test('assert:package refuses a /healthz whose pid is not the binary it spawned', async () => {
+  // The pid check, isolated: the stub stays ALIVE and never binds (exec, so
+  // the spawned pid is sleep's own; assert-package's `finally` kills it), so
+  // the exit check cannot fire. The decoy is deliberately CONVINCING — it
+  // answers every request the script makes the way a correct build would —
+  // so without the pid check the script really does print "packaging ok".
+  const PORT = 7443
+  const { dir, dist } = scratchDist('atrium-t10a-pid-')
   const stub = join(dir, 'stub')
-  writeFileSync(stub, '#!/bin/sh\nexit 1\n', { mode: 0o755 })
+  writeFileSync(stub, '#!/bin/sh\nexec sleep 30\n', { mode: 0o755 })
 
   const decoy = Bun.serve({
     hostname: '127.0.0.1',
@@ -235,29 +270,38 @@ test('assert:package refuses a /healthz that does not belong to the binary it sp
       if (path === '/healthz') return Response.json({ ok: true, pid: process.pid, assets: 3, execLine: process.execPath })
       if (path === '/assets/a.css') return new Response('.p-4{padding:1rem}', { headers: { 'content-type': 'text/css' } })
       if (path === '/assets/a.js') return new Response('export {}', { headers: { 'content-type': 'text/javascript' } })
-      return new Response(html, { headers: { 'content-type': 'text/html;charset=utf-8' } })
+      return new Response(DECOY_HTML, { headers: { 'content-type': 'text/html;charset=utf-8' } })
     },
   })
   try {
-    const proc = Bun.spawn([process.execPath, 'run', 'scripts/assert-package.ts', stub, dist, String(PORT)], {
-      env: { ...process.env, HOME: dir, XDG_RUNTIME_DIR: dir, XDG_CONFIG_HOME: dir },
-      stdout: 'pipe',
-      stderr: 'pipe',
-    })
-    const code = await Promise.race([proc.exited, Bun.sleep(4000).then(() => 'timeout' as const)])
-    if (code === 'timeout') {
-      proc.kill('SIGKILL')
-      throw new Error('assert-package.ts was still running after 4s against the decoy')
-    }
-    const stdout = await new Response(proc.stdout).text()
-    const stderr = await new Response(proc.stderr).text()
-
+    const { code, stdout, stderr } = await runAssertPackage(stub, dist, dir, PORT)
     expect(stdout).not.toContain('packaging ok')
     expect(code).not.toBe(0)
-    expect(stderr).toContain('foreign listener')
+    // Pid-specific: only the pid check prints this. Never 'foreign listener',
+    // which the exit check's message also contains.
+    expect(stderr).toContain("is not the spawned binary's pid")
     expect(existsSync(dist)).toBe(true)                        // the renamed dist came back
   } finally {
     decoy.stop(true)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('assert:package reports a spawned binary that exits before it could be tested', async () => {
+  // The exit check, isolated: nothing listens on the port, so there is no
+  // /healthz and the pid check cannot fire. Without the exit check the script
+  // still fails, but as "never started listening" — this pins the diagnosis.
+  const PORT = 7444
+  const { dir, dist } = scratchDist('atrium-t10a-exit-')
+  const stub = join(dir, 'stub')
+  writeFileSync(stub, '#!/bin/sh\nexit 1\n', { mode: 0o755 })
+  try {
+    const { code, stdout, stderr } = await runAssertPackage(stub, dist, dir, PORT)
+    expect(stdout).not.toContain('packaging ok')
+    expect(code).not.toBe(0)
+    expect(stderr).toContain('the spawned binary exited (code 1) before it could be tested')
+    expect(existsSync(dist)).toBe(true)
+  } finally {
     rmSync(dir, { recursive: true, force: true })
   }
 })
