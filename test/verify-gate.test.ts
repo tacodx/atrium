@@ -1,0 +1,263 @@
+import { test, expect } from 'bun:test'
+import { readFileSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import * as ts from 'typescript'
+
+// Task 10. These read package.json and .github/workflows/ci.yml by relative
+// path: `bun test` runs with the repo root as cwd (test/rungit.test.ts's
+// walk('src') relies on the same thing).
+const pkg = JSON.parse(readFileSync('package.json', 'utf8')) as {
+  scripts: Record<string, string>
+  engines: Record<string, string>
+}
+const workflow = readFileSync('.github/workflows/ci.yml', 'utf8')
+
+const STAGES = ['build', 'assert:package', 'test', 'typecheck']
+
+test('verify chains build, the packaging assertion, the test run and typecheck, in that order', () => {
+  const verify = pkg.scripts.verify
+  expect(typeof verify).toBe('string')
+  if (typeof verify !== 'string') throw new Error('scripts.verify is not a string')
+  const stages = verify.split('&&').map((s) => s.trim().replace(/^bun run /, ''))
+  // Exact equality, not toContain: a missing stage and a reordered chain must
+  // both fail. build before assert:package is the part that matters — the
+  // packaging assertion consumes ./atrium and ./web-dist, which build produces.
+  expect(stages).toEqual(STAGES)
+})
+
+test('every stage named in verify is a real script', () => {
+  for (const stage of STAGES) expect(Object.keys(pkg.scripts)).toContain(stage)
+  // Not hollow: a stage that exists but does nothing passes the line above.
+  expect(pkg.scripts.test).toBe('bun test')
+  expect(pkg.scripts['assert:package']).toContain('scripts/assert-package.ts')
+})
+
+test('CI runs the verify gate, not a bare test run', () => {
+  const run = workflow.match(/^\s*-\s*run:\s*bun run verify\s*$/m)
+  expect(run).not.toBeNull()
+  // Either of these lets a red `verify` pass the job, so presence alone is not
+  // enough: the step must also be unconditional and allowed to fail the job.
+  expect(workflow).not.toMatch(/continue-on-error/)
+  expect(workflow).not.toMatch(/^\s*(-\s*)?if:/m)
+})
+
+test('CI pins bun to the engines floor', () => {
+  // Line-anchored, so a comment or a suffixed version cannot satisfy it.
+  const pin = workflow.match(/^\s*bun-version:\s*(['"]?)(\d+\.\d+\.\d+)\1\s*$/m)
+  const floor = (pkg.engines.bun ?? '').match(/^>=\s*(\d+\.\d+\.\d+)$/)
+  // The anti-vacuity step: scripts/assert-package.ts records this project
+  // already shipping a gate that went vacuous when its regex stopped matching.
+  expect(pin).not.toBeNull()
+  expect(floor).not.toBeNull()
+  expect(pin![2]).toBe(floor![1]!)
+})
+
+// --- Task 10a (7): every server spawn is hermetic. ---
+//
+// A `serve` child that inherits the developer's HOME scans their real home
+// for repos on start, and one that inherits XDG_RUNTIME_DIR / XDG_CONFIG_HOME
+// reads their config and overwrites (then, on exit, deletes) the runtime
+// files of a server they are actually running. This walks the TypeScript AST
+// of every file under test/ and scripts/, finds each Bun.spawn / Bun.spawnSync
+// whose argv array literal contains the element 'serve', resolves its `env`
+// (inline literal, or a shorthand `env` hoisted into a `const`), and requires
+// HOME, XDG_RUNTIME_DIR and XDG_CONFIG_HOME each to be SET, after any spread,
+// to a value that traces back to mkdtempSync. An absent HOME is not scoping:
+// homedir() falls back to the passwd entry.
+//
+// Deliberately out of scope: test/serve-providers.test.ts's two children run
+// test/fixtures/*-probe.ts, which call startServer in-process with fixture
+// providers (no 'serve' argv); the in-process startServer calls throughout
+// the suite (they cannot change homedir()); and the `atrium open` children,
+// which are not servers. test/rungit.test.ts's first hooks-dir probe writes
+// the real runtime dir's nohooks/ on purpose — that is what it tests.
+
+type Site = { where: string; call: ts.CallExpression; sf: ts.SourceFile }
+
+function tsFilesUnder(dir: string): string[] {
+  const out: string[] = []
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, e.name)
+    if (e.isDirectory()) out.push(...tsFilesUnder(p))
+    else if (p.endsWith('.ts') || p.endsWith('.tsx')) out.push(p)
+  }
+  return out
+}
+
+function serverSpawns(): Site[] {
+  const sites: Site[] = []
+  for (const file of [...tsFilesUnder('test'), ...tsFilesUnder('scripts')]) {
+    const sf = ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, true)
+    const visit = (n: ts.Node): void => {
+      if (
+        ts.isCallExpression(n) &&
+        /^Bun\.spawn(Sync)?$/.test(n.expression.getText(sf)) &&
+        n.arguments[0] !== undefined &&
+        ts.isArrayLiteralExpression(n.arguments[0]) &&
+        n.arguments[0].elements.some((el) => ts.isStringLiteralLike(el) && el.text === 'serve')
+      ) {
+        const line = sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1
+        sites.push({ where: `${file}:${line}`, call: n, sf })
+      }
+      ts.forEachChild(n, visit)
+    }
+    visit(sf)
+  }
+  return sites
+}
+
+function unwrap(e: ts.Expression): ts.Expression {
+  while (ts.isNonNullExpression(e) || ts.isParenthesizedExpression(e) || ts.isAsExpression(e)) e = e.expression
+  return e
+}
+
+// The nearest `const/let name = …` visible from `from`: the innermost
+// enclosing block or file that declares it before `from`.
+function declOf(name: string, from: ts.Node): ts.VariableDeclaration | undefined {
+  for (let scope: ts.Node | undefined = from.parent; scope; scope = scope.parent) {
+    if (!ts.isBlock(scope) && !ts.isSourceFile(scope)) continue
+    let found: ts.VariableDeclaration | undefined
+    for (const st of scope.statements) {
+      if (st.pos > from.pos) break
+      if (!ts.isVariableStatement(st)) continue
+      for (const d of st.declarationList.declarations) {
+        if (ts.isIdentifier(d.name) && d.name.text === name) found = d
+      }
+    }
+    if (found) return found
+  }
+  return undefined
+}
+
+function fnDecl(name: string, sf: ts.SourceFile): ts.FunctionDeclaration | undefined {
+  return sf.statements.find((s): s is ts.FunctionDeclaration => ts.isFunctionDeclaration(s) && s.name?.text === name)
+}
+
+function callsMkdtemp(n: ts.Node): boolean {
+  if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === 'mkdtempSync') return true
+  return ts.forEachChild(n, callsMkdtemp) ?? false
+}
+
+// Does this expression evaluate to a directory made by mkdtempSync — directly,
+// through a variable, through a helper function that makes one, or through a
+// property of an object such a helper returns (config.test.ts's
+// `scratchConfig(...).XDG_CONFIG_HOME`)?
+function isTempDir(expr: ts.Expression, sf: ts.SourceFile, depth = 0): boolean {
+  if (depth > 8) return false
+  const e = unwrap(expr)
+  if (ts.isCallExpression(e) && ts.isIdentifier(e.expression)) {
+    if (e.expression.text === 'mkdtempSync') return true
+    const f = fnDecl(e.expression.text, sf)
+    return f?.body !== undefined && callsMkdtemp(f.body)
+  }
+  if (ts.isIdentifier(e)) {
+    const d = declOf(e.text, e)
+    return d?.initializer !== undefined && isTempDir(d.initializer, sf, depth + 1)
+  }
+  if (ts.isPropertyAccessExpression(e)) return isTempDir(e.expression, sf, depth + 1)
+  return false
+}
+
+function envLiteral(site: Site): ts.ObjectLiteralExpression | undefined {
+  const opts = site.call.arguments[1]
+  if (opts === undefined || !ts.isObjectLiteralExpression(opts)) return undefined
+  for (const p of opts.properties) {
+    if (ts.isShorthandPropertyAssignment(p) && p.name.text === 'env') {
+      const init = declOf('env', site.call)?.initializer
+      return init !== undefined && ts.isObjectLiteralExpression(unwrap(init)) ? (unwrap(init) as ts.ObjectLiteralExpression) : undefined
+    }
+    if (ts.isPropertyAssignment(p) && p.name.getText(site.sf) === 'env') {
+      let init = unwrap(p.initializer)
+      if (ts.isIdentifier(init)) {
+        const d = declOf(init.text, site.call)?.initializer
+        if (d === undefined) return undefined
+        init = unwrap(d)
+      }
+      return ts.isObjectLiteralExpression(init) ? init : undefined
+    }
+  }
+  return undefined
+}
+
+const SCOPED = ['HOME', 'XDG_RUNTIME_DIR', 'XDG_CONFIG_HOME']
+
+function unscopedKeys(site: Site): string[] {
+  const env = envLiteral(site)
+  if (env === undefined) return ['env (absent or unresolvable)']
+  const props = [...env.properties]
+  const lastSpread = props.reduce((acc, p, i) => (ts.isSpreadAssignment(p) ? i : acc), -1)
+  return SCOPED.filter((key) => {
+    const i = props.findIndex((p) => p.name !== undefined && p.name.getText(site.sf) === key)
+    if (i < 0 || i < lastSpread) return true                // absent, or overridden by a later spread
+    const p = props[i]!
+    const value = ts.isPropertyAssignment(p) ? p.initializer : ts.isShorthandPropertyAssignment(p) ? p.name : undefined
+    return value === undefined || !isTempDir(value, site.sf)
+  })
+}
+
+test('every server spawn scopes HOME, XDG_RUNTIME_DIR and XDG_CONFIG_HOME to a temp dir', () => {
+  const sites = serverSpawns()
+  // Exactly ten, measured in Task 10a: serve.test.ts x4, config.test.ts x4,
+  // repos-pane.test.ts x1, scripts/assert-package.ts x1. A matcher that
+  // silently stops matching would otherwise pass with nothing to check.
+  expect(sites.map((s) => s.where)).toHaveLength(10)
+  const leaks = sites.flatMap((s) => unscopedKeys(s).map((k) => `${s.where}: ${k}`))
+  expect(leaks).toEqual([])
+})
+
+// --- Task 10a (8): assert:package tests the binary it spawned. ---
+//
+// Measured before the fix: with a healthy atrium already on the port and the
+// binary replaced by a stub that exits 1, the script printed "packaging ok"
+// and exited 0. The decoy below is deliberately CONVINCING — it answers every
+// request the script makes the way a correct build would — so that without the
+// pid/exited check the script really does pass, as it did then. A temp
+// web-dist is used, never the repo's: the script renames the directory it is
+// given. Port 7443 is in 10a's range (7440-7449).
+test('assert:package refuses a /healthz that does not belong to the binary it spawned', async () => {
+  const PORT = 7443
+  const dir = mkdtempSync(join(tmpdir(), 'atrium-t10a-decoy-'))
+  const dist = join(dir, 'web-dist')
+  mkdirSync(join(dist, 'assets'), { recursive: true })
+  const html = '<!doctype html><link rel="stylesheet" href="/assets/a.css"><script type="module" src="/assets/a.js"></script>'
+  writeFileSync(join(dist, 'index.html'), html)
+  writeFileSync(join(dist, 'assets', 'a.css'), '.p-4{padding:1rem}')
+  writeFileSync(join(dist, 'assets', 'a.js'), 'export {}')
+  const stub = join(dir, 'stub')
+  writeFileSync(stub, '#!/bin/sh\nexit 1\n', { mode: 0o755 })
+
+  const decoy = Bun.serve({
+    hostname: '127.0.0.1',
+    port: PORT,
+    fetch(req) {
+      const path = new URL(req.url).pathname
+      if (path === '/healthz') return Response.json({ ok: true, pid: process.pid, assets: 3, execLine: process.execPath })
+      if (path === '/assets/a.css') return new Response('.p-4{padding:1rem}', { headers: { 'content-type': 'text/css' } })
+      if (path === '/assets/a.js') return new Response('export {}', { headers: { 'content-type': 'text/javascript' } })
+      return new Response(html, { headers: { 'content-type': 'text/html;charset=utf-8' } })
+    },
+  })
+  try {
+    const proc = Bun.spawn([process.execPath, 'run', 'scripts/assert-package.ts', stub, dist, String(PORT)], {
+      env: { ...process.env, HOME: dir, XDG_RUNTIME_DIR: dir, XDG_CONFIG_HOME: dir },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    const code = await Promise.race([proc.exited, Bun.sleep(4000).then(() => 'timeout' as const)])
+    if (code === 'timeout') {
+      proc.kill('SIGKILL')
+      throw new Error('assert-package.ts was still running after 4s against the decoy')
+    }
+    const stdout = await new Response(proc.stdout).text()
+    const stderr = await new Response(proc.stderr).text()
+
+    expect(stdout).not.toContain('packaging ok')
+    expect(code).not.toBe(0)
+    expect(stderr).toContain('foreign listener')
+    expect(existsSync(dist)).toBe(true)                        // the renamed dist came back
+  } finally {
+    decoy.stop(true)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
