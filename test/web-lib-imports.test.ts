@@ -28,14 +28,31 @@ function libFiles(dir = LIB): string[] {
 
 const isFile = (p: string) => { try { return statSync(p).isFile() } catch { return false } }
 
-/** A relative specifier resolved to a FILE inside web/src/lib, or undefined. */
-function resolveLocal(from: string, spec: string): string | undefined {
-  if (!spec.startsWith('.')) return undefined
+// Under `moduleResolution: bundler`, a `.js`-family suffix names the TS source
+// beside it: `./session.js` IS session.ts to tsc and to the bundler. Where
+// tsc is stricter (it maps .mjs/.cjs only to .mts/.cts), this over-approximates,
+// which can only ADD edges: a cycle can be over-reported, never hidden.
+const JS_TO_TS: Record<string, readonly string[]> = {
+  '.js': ['.ts', '.tsx'], '.jsx': ['.tsx', '.ts'], '.mjs': ['.mts', '.ts'], '.cjs': ['.cts', '.ts'],
+}
+
+/**
+ * A relative specifier resolved to the FILE it names, or undefined when no
+ * candidate exists. FAIL CLOSED: the caller treats undefined as a test
+ * failure, never as a skipped edge — a specifier this resolver does not
+ * understand is exactly where a cycle would hide (a `./session.js` re-export
+ * once did, with typecheck green).
+ */
+function resolveRelative(from: string, spec: string): string | undefined {
   const base = resolve(dirname(from), spec)
-  for (const c of [base, `${base}.ts`, `${base}.tsx`, join(base, 'index.ts'), join(base, 'index.tsx')]) {
-    if (isFile(c) && c.startsWith(LIB + sep)) return c
-  }
-  return undefined
+  const ext = /\.[cm]?jsx?$/.exec(base)?.[0]
+  const stem = ext === undefined ? base : base.slice(0, -ext.length)
+  const candidates = [
+    base,
+    ...(ext === undefined ? [] : JS_TO_TS[ext]!.map((e) => stem + e)),
+    `${base}.ts`, `${base}.tsx`, join(base, 'index.ts'), join(base, 'index.tsx'),
+  ]
+  return candidates.find(isFile)
 }
 
 function specifierOf(st: ts.Statement): string | undefined {
@@ -49,17 +66,21 @@ function specifierOf(st: ts.Statement): string | undefined {
   return undefined
 }
 
-function edges(files: string[]): [string, string][] {
-  const out: [string, string][] = []
+/** Edges between web/src/lib's own files, plus every relative specifier that resolved to nothing. */
+function walk(files: string[]): { edges: [string, string][]; unresolved: string[] } {
+  const edges: [string, string][] = []
+  const unresolved: string[] = []
   for (const file of files) {
     const sf = ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, true)
     for (const st of sf.statements) {
       const spec = specifierOf(st)
-      const to = spec === undefined ? undefined : resolveLocal(file, spec)
-      if (to !== undefined) out.push([rel(file), rel(to)])
+      if (spec === undefined || !spec.startsWith('.')) continue
+      const to = resolveRelative(file, spec)
+      if (to === undefined) unresolved.push(`${rel(file)} -> ${spec}`)
+      else if (to.startsWith(LIB + sep)) edges.push([rel(file), rel(to)])
     }
   }
-  return out
+  return { edges, unresolved }
 }
 
 function cycle(es: [string, string][]): string[] | undefined {
@@ -89,7 +110,8 @@ function cycle(es: [string, string][]): string[] | undefined {
 
 test('web/src/lib has no static import cycle', () => {
   const files = libFiles()
-  const es = edges(files)
+  const { edges: es, unresolved } = walk(files)
+  expect(unresolved).toEqual([])
   expect(cycle(es)).toBeUndefined()
   // Anti-vacuity: the walk saw the files M-4 was about and resolved the edge
   // each has to the leaf. A parser that found no edges would otherwise report
@@ -98,6 +120,18 @@ test('web/src/lib has no static import cycle', () => {
   expect(es).toContainEqual(['web/src/lib/api.ts', 'web/src/lib/storage-keys.ts'])
   expect(es).toContainEqual(['web/src/lib/session.ts', 'web/src/lib/storage-keys.ts'])
   expect(es).toContainEqual(['web/src/lib/session.ts', 'web/src/lib/api.ts'])
+})
+
+// The resolver itself: the `.js` family maps onto the TS source, and a
+// specifier naming no file comes back undefined (which the walk reports).
+test('the resolver maps .js-family suffixes to their TS source and reports what it cannot resolve', () => {
+  const api = join(LIB, 'api.ts')
+  const session = join(LIB, 'session.ts')
+  for (const spec of ['./session', './session.ts', './session.js', './session.jsx', './session.mjs', '../lib/session.js']) {
+    expect([spec, resolveRelative(api, spec)]).toEqual([spec, session])
+  }
+  expect(resolveRelative(api, './no-such-module')).toBeUndefined()
+  expect(resolveRelative(api, './no-such-module.js')).toBeUndefined()
 })
 
 test('the cycle detector itself finds a cycle, and only a cycle', () => {
