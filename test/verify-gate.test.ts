@@ -180,13 +180,26 @@ function returnsOf(body: ts.Node): ts.ReturnStatement[] {
   return out
 }
 
+// Does control never run off the end of this statement? Conservative: only a
+// return, a throw, a block ending in one, or an if/else both of whose arms
+// end in one. Anything else (loops, switch, try) counts as reachable.
+function terminates(st: ts.Statement | undefined): boolean {
+  if (st === undefined) return false
+  if (ts.isReturnStatement(st) || ts.isThrowStatement(st)) return true
+  if (ts.isBlock(st)) return terminates(st.statements.at(-1))
+  if (ts.isIfStatement(st)) return st.elseStatement !== undefined && terminates(st.thenStatement) && terminates(st.elseStatement)
+  return false
+}
+
 // The helper a call invokes, if it is a top-level function declaration in
 // this file, with its returned expressions. undefined for anything else, and
-// for a helper with a bare `return;` or no return at all: fail closed.
+// for a helper with a bare `return;`, no return at all, or a body whose end
+// is reachable (fix round 2, item D: `if (…) return mkdtempSync(…)` alone
+// falls through to undefined, and Bun then omits HOME): fail closed.
 function helperReturns(e: ts.Expression, sf: ts.SourceFile): ts.Expression[] | undefined {
   if (!ts.isCallExpression(e) || !ts.isIdentifier(e.expression)) return undefined
   const f = fnDecl(e.expression.text, sf)
-  if (f?.body === undefined) return undefined
+  if (f?.body === undefined || !terminates(f.body)) return undefined
   const rets = returnsOf(f.body)
   if (rets.length === 0 || rets.some((r) => r.expression === undefined)) return undefined
   return rets.map((r) => r.expression!)
