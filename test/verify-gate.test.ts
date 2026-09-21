@@ -303,6 +303,7 @@ test('every server spawn scopes HOME, XDG_RUNTIME_DIR and XDG_CONFIG_HOME to a t
 // binary replaced by a stub that exits 1, the script printed "packaging ok"
 // and exited 0. assert-package.ts has two checks against that, and each is
 // pinned by its own test below, each able to fail only for its own reason.
+// A third test runs the measured scenario itself and pins only its outcome.
 //
 // Fix round F1: the original single test (stub exits 1, decoy on the port)
 // stayed green with the pid check deleted, because the exit check fired
@@ -312,7 +313,7 @@ test('every server spawn scopes HOME, XDG_RUNTIME_DIR and XDG_CONFIG_HOME to a t
 // deleting only the exit block reddens the second alone.
 //
 // A temp web-dist is used, never the repo's: the script renames the directory
-// it is given. Ports 7443 and 7444 are in 10a's range (7440-7449).
+// it is given. Ports 7442, 7443 and 7444 are in 10a's range (7440-7449).
 
 const DECOY_HTML = '<!doctype html><link rel="stylesheet" href="/assets/a.css"><script type="module" src="/assets/a.js"></script>'
 
@@ -342,6 +343,22 @@ async function runAssertPackage(stub: string, dist: string, dir: string, port: n
   return { code, stdout, stderr }
 }
 
+// Answers every request assert-package.ts makes the way a correct build would,
+// so a run against it that is not refused prints "packaging ok".
+function convincingDecoy(port: number) {
+  return Bun.serve({
+    hostname: '127.0.0.1',
+    port,
+    fetch(req) {
+      const path = new URL(req.url).pathname
+      if (path === '/healthz') return Response.json({ ok: true, pid: process.pid, assets: 3, execLine: process.execPath })
+      if (path === '/assets/a.css') return new Response('.p-4{padding:1rem}', { headers: { 'content-type': 'text/css' } })
+      if (path === '/assets/a.js') return new Response('export {}', { headers: { 'content-type': 'text/javascript' } })
+      return new Response(DECOY_HTML, { headers: { 'content-type': 'text/html;charset=utf-8' } })
+    },
+  })
+}
+
 test('assert:package refuses a /healthz whose pid is not the binary it spawned', async () => {
   // The pid check, isolated: the stub stays ALIVE and never binds (exec, so
   // the spawned pid is sleep's own; assert-package's `finally` kills it), so
@@ -353,17 +370,7 @@ test('assert:package refuses a /healthz whose pid is not the binary it spawned',
   const stub = join(dir, 'stub')
   writeFileSync(stub, '#!/bin/sh\nexec sleep 30\n', { mode: 0o755 })
 
-  const decoy = Bun.serve({
-    hostname: '127.0.0.1',
-    port: PORT,
-    fetch(req) {
-      const path = new URL(req.url).pathname
-      if (path === '/healthz') return Response.json({ ok: true, pid: process.pid, assets: 3, execLine: process.execPath })
-      if (path === '/assets/a.css') return new Response('.p-4{padding:1rem}', { headers: { 'content-type': 'text/css' } })
-      if (path === '/assets/a.js') return new Response('export {}', { headers: { 'content-type': 'text/javascript' } })
-      return new Response(DECOY_HTML, { headers: { 'content-type': 'text/html;charset=utf-8' } })
-    },
-  })
+  const decoy = convincingDecoy(PORT)
   try {
     const { code, stdout, stderr } = await runAssertPackage(stub, dist, dir, PORT)
     expect(stdout).not.toContain('packaging ok')
@@ -393,6 +400,31 @@ test('assert:package reports a spawned binary that exits before it could be test
     expect(stderr).toContain('the spawned binary exited (code 1) before it could be tested')
     expect(existsSync(dist)).toBe(true)
   } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('assert:package fails the measured scenario: a stub that exits 1 while a convincing listener answers', async () => {
+  // Fix round 2, item A. The two tests above isolate one check each, so
+  // neither runs what Task 10a actually measured: a dead stub AND a live,
+  // convincing listener at once. A mutation that makes each check stand down
+  // exactly when the other one's isolated test cannot see it (the pid check
+  // only while the child is alive, the exit check only when nothing answered)
+  // kept both green while this scenario printed "packaging ok". This test pins
+  // the OUTCOME only — non-zero exit, no "packaging ok" — and deliberately no
+  // message substring: coupling to a message is how the first vacuity hid.
+  const PORT = 7442
+  const { dir, dist } = scratchDist('atrium-t10a-both-')
+  const stub = join(dir, 'stub')
+  writeFileSync(stub, '#!/bin/sh\nexit 1\n', { mode: 0o755 })
+  const decoy = convincingDecoy(PORT)
+  try {
+    const { code, stdout } = await runAssertPackage(stub, dist, dir, PORT)
+    expect(stdout).not.toContain('packaging ok')
+    expect(code).not.toBe(0)
+    expect(existsSync(dist)).toBe(true)
+  } finally {
+    decoy.stop(true)
     rmSync(dir, { recursive: true, force: true })
   }
 })
