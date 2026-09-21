@@ -230,6 +230,13 @@ Spec §8.9 (spec lines 448–451) names the same four headers. Its `connect-src`
 the broader of the two and is what `SECURITY_HEADERS` actually sends. Neither mentions `style-src`, which is the
 point.
 
+*Citation correction, 2026-09-21 (Task 10c; the ruling itself is unchanged).* The line numbers above were taken
+at `a4881ae` and have since drifted. Old → new at `4f7956c`: `src/server/serve.ts:11-17` (`SECURITY_HEADERS`) →
+`:36-42`; `scripts/assert-package.ts` fetch lines `:42`, `:58`, `:75`, `:96`, `:119` → `:92` (`/healthz`, the two
+original health fetches are now one), `:140` (`/`), `:161` (CSS), `:184` (JS); spec §8.9 "lines 448–451" →
+`docs/superpowers/specs/2026-09-13-atrium-design.md:488-491`. Re-resolve by content, not by these numbers, if the
+files move again.
+
 ---
 
 ## Measured — the `timedOut` channel
