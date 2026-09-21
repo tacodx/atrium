@@ -11,10 +11,12 @@ import {
   stateLabel,
   type RepoRow,
   type ReposPaneState,
+  type ScanDiagnostics,
 } from '../web/src/panes/ReposPane'
 import { postReposAction } from '../web/src/lib/api'
 import type { ProviderStatus } from '../src/core/wire'
-import type { RepoWire, ReposWire } from '../src/providers/repos/index'
+import { createReposProvider, type RepoWire, type ReposWire } from '../src/providers/repos/index'
+import { reposConfigSchema } from '../src/providers/repos/config'
 import { makeRepoIn } from './fixtures/gitrepo'
 import { openSession } from './fixtures/ws'
 
@@ -42,15 +44,17 @@ const NOW_S = NOW_MS / 1000
 //    AFTER it by name, and `foxtrot` does the same against `echo` on the undated
 //    side. Array.prototype.sort is stable, so a comparator whose tie-break
 //    became `return 0` would leave both pairs in this listed order — which is
-//    the only reason test 7's equality can see the tie-break at all (M20). Both
+//    the only reason the equality in 'recent is ordered most-recent-first with
+//    undated repos last' can see the tie-break at all (M20). Both
 //    pairs are needed: the spec names the undated-vs-undated tie explicitly.
 //  - `hotel`'s last commit sits on the staleness boundary EXACTLY, which is the
 //    only fixture the strict `>` in isStale decides (M19).
 //
 // `dropped` carries a second row whose reason is NOT 'ambiguous', because with
 // one already-ambiguous row the `.filter` in the derivation could be deleted
-// outright and stay green (M21). That the 'timed-out' row reaches no surface at
-// all is Lens B's M-5, carried to Task 10, not asserted here.
+// outright and stay green (M21). The 'timed-out' row also renders as a scan
+// note; the counts, order and tone are pinned by the 'scan notes …' tests, not
+// by this fixture.
 const READY_WIRE: ReposWire = {
   staleDays: 30,
   scannedAt: NOW_MS,
@@ -121,6 +125,10 @@ const EMPTY_SNAPSHOT: Record<string, ProviderStatus> = {
 }
 
 type ReadyState = Extract<ReposPaneState, { kind: 'ready' }>
+type EmptyState = Extract<ReposPaneState, { kind: 'empty' }>
+
+const NO_ERRORS: ScanDiagnostics['errors'] = { 'root-missing': 0, 'root-unreadable': 0, 'candidate-error': 0 }
+const NO_DIAGNOSTICS: ScanDiagnostics = { timedOut: 0, invalid: 0, errors: NO_ERRORS }
 
 function derive(providers: Record<string, ProviderStatus>, hasSnapshot = true): ReposPaneState {
   return deriveReposPaneState({ hasSnapshot, providers, nowMs: NOW_MS })
@@ -129,6 +137,12 @@ function derive(providers: Record<string, ProviderStatus>, hasSnapshot = true): 
 function readyFrom(wire: ReposWire): ReadyState {
   const s = derive({ repos: { data: wire, schedules: {} } })
   if (s.kind !== 'ready') throw new Error(`expected a ready state, got ${s.kind}`)
+  return s
+}
+
+function emptyFrom(wire: ReposWire): EmptyState {
+  const s = derive({ repos: { data: wire, schedules: {} } })
+  if (s.kind !== 'empty') throw new Error(`expected an empty state, got ${s.kind}`)
   return s
 }
 
@@ -267,7 +281,8 @@ test('droppedAmbiguous is reported, not discarded', () => {
   const html = render(s)
   expect(html).toContain('1 candidate(s) hidden as ambiguous')
   // The plan asks here for "the rendered markup contains no /fixtures/ string".
-  // That is unrealisable and contradicts test 15: every SURFACED repo's row
+  // That is unrealisable and contradicts 'actions are POST buttons, never links
+  // or forms': every SURFACED repo's row
   // carries data-repo="/fixtures/<name>" by design. The property the plan
   // actually wants is that a DROPPED candidate contributes no path and no row,
   // which is what these two assertions pin.
@@ -309,7 +324,7 @@ test('the three non-populated states render three visibly distinct panes', () =>
   const REASON = '<script>alert(1)</script> ENOENT'
   const loading = render({ kind: 'loading' })
   const unavailable = render({ kind: 'unavailable', reason: REASON })
-  const empty = render({ kind: 'empty' })
+  const empty = render({ kind: 'empty', droppedAmbiguous: [], diagnostics: NO_DIAGNOSTICS })
 
   expect(loading).toContain('data-state="loading"')
   expect(loading).toContain('Loading repositories…')
@@ -334,7 +349,9 @@ test('an attacker-controlled branch name renders escaped', () => {
     origin: 'top-level', metaStatus: 'ok', branch: '<script>alert(1)</script>',
     repoState: 'clean', lastCommitAt: NOW_S - 3600, uncommittedCount: 0,
   }
-  const html = render({ kind: 'ready', needsAttention: [], recent: [hostile], droppedAmbiguous: [] })
+  const html = render({
+    kind: 'ready', needsAttention: [], recent: [hostile], droppedAmbiguous: [], diagnostics: NO_DIAGNOSTICS,
+  })
   expect(html).toContain('&lt;script&gt;')
   expect(html).toContain('&lt;img')
   expect(html).not.toContain('<script>')
@@ -451,6 +468,148 @@ test('the action POST carries the token in a header and the path in a body, neve
   expect(src).toContain('if (!r.ok) console.error(')
 })
 
+// --- Scan notes (M-5) ---------------------------------------------------------
+//
+// COUNTS and closed-set codes only, never a name or a path (SS8.7): a dropped
+// row's name is basename(path) of a directory anyone can create, and for a
+// probe root it is the operator's username. None of these tests binds a port.
+
+const KILO: RepoWire = {
+  id: 'kilo', path: '/fixtures/kilo', name: 'kilo', bare: false, origin: 'top-level',
+  metaStatus: 'ok', branch: 'main', repoState: 'clean', lastCommitAt: NOW_S - 3600, uncommittedCount: 0,
+}
+
+function scanWire(over: Partial<ReposWire>): ReposWire {
+  return { staleDays: 30, scannedAt: NOW_MS, repos: [], dropped: [], errors: [], ...over }
+}
+
+/** Every rendered note as [data-note, class, text], in document order. */
+function notesOf(html: string): string[][] {
+  return [...html.matchAll(/<li data-note="([^"]*)" class="([^"]*)">([^<]*)<\/li>/g)].map((m) => [m[1]!, m[2]!, m[3]!])
+}
+
+const AMBER = 'text-xs text-amber-700'
+const GREY = 'text-xs text-gray-500'
+
+test('scan notes count timed-out and invalid drops, never their names, and stay silent on deliberate drops', () => {
+  // 2 timed-out against 1 invalid, so swapping the two filters is visible.
+  // One row of each deliberate reason, so counting "every drop that is not
+  // ambiguous or timed-out" as invalid is visible too. The ambiguous row is
+  // there for its NAME: 'ambig' could never be asserted absent, because the
+  // rendered word "ambiguous" contains it.
+  const s = readyFrom(scanWire({
+    repos: [KILO],
+    dropped: [
+      { id: 'x0', name: 'NAME-SENTINEL-ambig', reason: 'ambiguous' },
+      { id: 'x1', name: 'NAME-SENTINEL-slow-1', reason: 'timed-out' },
+      { id: 'x2', name: 'NAME-SENTINEL-slow-2', reason: 'timed-out' },
+      { id: 'x3', name: 'NAME-SENTINEL-broken', reason: 'invalid' },
+      { id: 'x4', name: 'NAME-SENTINEL-wt', reason: 'worktree' },
+      { id: 'x5', name: 'NAME-SENTINEL-sub', reason: 'submodule' },
+      { id: 'x6', name: 'NAME-SENTINEL-vend', reason: 'vendored' },
+    ],
+  }))
+  expect(s.diagnostics).toEqual({ timedOut: 2, invalid: 1, errors: NO_ERRORS })
+  const html = render(s)
+  expect(html).toContain('2 candidate(s) hidden: git timed out')
+  expect(html).toContain('1 candidate(s) hidden as invalid')
+  expect(html).toContain('1 candidate(s) hidden as ambiguous')
+  expect(html).not.toContain('NAME-SENTINEL')
+  for (const deliberate of ['worktree', 'submodule', 'vendored']) expect(html).not.toContain(deliberate)
+})
+
+test('scan notes count every error code as a multiset', () => {
+  // Distinct counts per code (1, 3, 2), interleaved, so de-duplicating,
+  // saturating at 1 or reading one code for all three each changes a number.
+  const s = readyFrom(scanWire({
+    repos: [KILO],
+    errors: ['root-unreadable', 'candidate-error', 'root-unreadable', 'root-missing', 'candidate-error', 'root-unreadable'],
+  }))
+  expect(s.diagnostics.errors).toEqual({ 'root-missing': 1, 'root-unreadable': 3, 'candidate-error': 2 })
+  const html = render(s)
+  expect(html).toContain('1 scan root(s) not found — check repos.extraRoots')
+  expect(html).toContain('3 folder(s) could not be read')
+  expect(html).toContain('2 candidate(s) could not be checked')
+})
+
+// Order AND tone, pinned exactly (design rules 1 and 2): all six notes at
+// once, each with a distinct count, compared as one whole list of
+// [data-note, class, text]. A swapped pair, a note moved, a tone dropped to
+// grey or raised to amber, or a changed word each change this equality.
+test('scan notes render in a fixed order with a fixed tone per note', () => {
+  const wire = scanWire({
+    repos: [KILO],
+    errors: ['candidate-error', 'root-unreadable', 'root-missing', 'candidate-error', 'root-unreadable', 'root-unreadable'],
+    dropped: [
+      { id: 'a1', name: 'NAME-SENTINEL-a1', reason: 'ambiguous' },
+      { id: 'i1', name: 'NAME-SENTINEL-i1', reason: 'invalid' },
+      { id: 'a2', name: 'NAME-SENTINEL-a2', reason: 'ambiguous' },
+      { id: 't1', name: 'NAME-SENTINEL-t1', reason: 'timed-out' },
+      { id: 'a3', name: 'NAME-SENTINEL-a3', reason: 'ambiguous' },
+      { id: 'i2', name: 'NAME-SENTINEL-i2', reason: 'invalid' },
+      { id: 'a4', name: 'NAME-SENTINEL-a4', reason: 'ambiguous' },
+      { id: 'i3', name: 'NAME-SENTINEL-i3', reason: 'invalid' },
+      { id: 'a5', name: 'NAME-SENTINEL-a5', reason: 'ambiguous' },
+      { id: 'i4', name: 'NAME-SENTINEL-i4', reason: 'invalid' },
+    ],
+  })
+  const expected = [
+    ['root-missing', AMBER, '1 scan root(s) not found — check repos.extraRoots'],
+    ['root-unreadable', GREY, '3 folder(s) could not be read'],
+    ['candidate-error', AMBER, '2 candidate(s) could not be checked'],
+    ['timed-out', AMBER, '1 candidate(s) hidden: git timed out'],
+    ['invalid', GREY, '4 candidate(s) hidden as invalid (a broken .git, or a scan root inside a repository)'],
+    ['ambiguous', GREY, '5 candidate(s) hidden as ambiguous'],
+  ]
+  expect(notesOf(render(readyFrom(wire)))).toEqual(expected)
+  // The same list in the EMPTY state: the notes are shared, not ready-only.
+  expect(notesOf(render(emptyFrom({ ...wire, repos: [] })))).toEqual(expected)
+})
+
+test('scan notes: zero repos with a missing root or a hidden candidate does not read as No repositories found', () => {
+  const missing = emptyFrom(scanWire({ errors: ['root-missing'] }))
+  expect(missing.diagnostics.errors['root-missing']).toBe(1)
+  const a = render(missing)
+  expect(a).toContain('data-state="empty"')
+  expect(a).toContain('No repositories shown')
+  expect(a).toContain('1 scan root(s) not found')
+  expect(a).not.toContain('No repositories found')
+
+  // Every candidate ambiguous: something WAS found, and hidden.
+  const ambiguousOnly = emptyFrom(scanWire({ dropped: [{ id: 'q', name: 'NAME-SENTINEL-q', reason: 'ambiguous' }] }))
+  expect(ambiguousOnly.droppedAmbiguous).toEqual(['NAME-SENTINEL-q'])
+  const b = render(ambiguousOnly)
+  expect(b).toContain('No repositories shown')
+  expect(b).toContain('1 candidate(s) hidden as ambiguous')
+  expect(b).not.toContain('NAME-SENTINEL')
+
+  // And the plain case still reads as it always did: nothing hidden, no notes.
+  const nothing = render(emptyFrom(scanWire({})))
+  expect(nothing).toContain('No repositories found')
+  expect(nothing).not.toContain('data-scan-notes')
+})
+
+test('scan notes reach the pane from a real discovery pass: a mistyped extraRoot', async () => {
+  // The step that makes the hand-built wires above non-vacuous for the error
+  // channel: the provider's own output, through its own toClient. No port,
+  // and an injected empty home (SS10 rule 1) — its probe exits 128 and is
+  // skipped, so the only thing on the wire is the missing root.
+  const home = mkdtempSync(join(tmpdir(), 'atrium-t10-scan-home-'))
+  try {
+    const provider = createReposProvider({ homeDir: home })
+    const cfg = reposConfigSchema.parse({ extraRoots: ['/nonexistent/atrium-mistyped-root'] })
+    const data = await provider.fetch(cfg, { schedule: 'discovery', signal: new AbortController().signal })
+    const wire = provider.toClient(data) as ReposWire
+    expect(wire.errors).toEqual(['root-missing'])
+    const html = render(emptyFrom(wire))
+    expect(notesOf(html)).toEqual([['root-missing', AMBER, '1 scan root(s) not found — check repos.extraRoots']])
+    expect(html).not.toContain('No repositories found')
+    expect(html).not.toContain('atrium-mistyped-root')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
 // --- End-to-end smoke ---------------------------------------------------------
 
 test('the assembled server serves the fixture repos over an authenticated /api/state', async () => {
@@ -530,7 +689,7 @@ test('the assembled server serves the fixture repos over an authenticated /api/s
     // 45, not the default 30, so the assertion cannot pass on a dropped config.
     expect(wire.staleDays).toBe(STALE_DAYS)
 
-    // THE step that makes the seventeen hand-built-fixture tests above
+    // THE step that makes the hand-built-fixture tests above
     // non-vacuous: the real wire value, straight from the running binary, fed
     // into this task's own derivation and rendered.
     const state = deriveReposPaneState({ hasSnapshot: true, providers: body, nowMs: Date.now() })
