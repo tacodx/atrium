@@ -296,7 +296,10 @@ function parentOf(c: string, valid: string[]): string | undefined {
  * (surface): testing check-ignore first surfaces every worktree as a
  * project. Row 2 must precede row 3 for the same reason: a submodule is
  * also tracked, so plain ls-files is non-empty and row 3 would claim it with
- * the wrong reason.
+ * the wrong reason. Rows 2 and 3 must both precede row 4: row 4 runs
+ * check-ignore with --no-index, so it no longer consults the index, and a
+ * submodule or vendored child under an ignored directory (mods/, vendor/)
+ * would otherwise surface as a container child.
  *
  * Timeout short-circuit: a timed-out check-ignore returns code 1 —
  * byte-identical to a genuine "not ignored" — so without GitResult.timedOut
@@ -340,7 +343,15 @@ async function classify(
   // Row 4 — container: ignored by the parent (exit 0 = ignored, 1 = not,
   // 128 = not a repository), or the parent is listed in treatAsContainer.
   if (containers.has(parent)) return { kind: 'surface', origin: 'container-child' }
-  const ignored = await runGit(parent, ['check-ignore', '-q', '--', rel], { timeoutMs })
+  // check-ignore REFUSES :(literal), exit 128 "pathspec magic not supported by
+  // this command", and GIT_LITERAL_PATHSPECS=1 makes it refuse every path the
+  // same way (both measured, 2.43.0 and 2.55.0). It already matches the path
+  // itself literally against the ignore rules; a bare name goes wrong in two
+  // other places. --no-index removes the index lookup, which IS a glob (a
+  // tracked a1 answers "not ignored" for a[1]); that is safe only because rows
+  // 2 and 3 have just shown nothing at or under rel is in the index. The './'
+  // prefix stops a leading ':' being read as magic.
+  const ignored = await runGit(parent, ['check-ignore', '-q', '--no-index', '--', `./${rel}`], { timeoutMs })
   if (ignored.timedOut) return { kind: 'drop', reason: 'timed-out' }
   if (isCodeZero(ignored.code)) return { kind: 'surface', origin: 'container-child' }
 

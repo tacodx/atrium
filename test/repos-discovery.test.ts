@@ -350,6 +350,53 @@ test('a child in a directory named :x is not claimed by a submodule at x (row 2 
   ])
 })
 
+// Row 4. check-ignore refuses :(literal) outright (exit 128), so it takes the
+// other route: --no-index (a tracked a1 no longer answers for a[1]) and a './'
+// prefix (a leading ':' is no longer magic). One pin per half.
+test('an ignored child named a[1] surfaces as a container child even though the parent tracks a1', async () => {
+  const root = makeScanRoot()
+  const parent = parentTracking(root, 'a1')
+  writeGitignore(parent, ['/a\\[1\\]/'])
+  const child = makeRepoIn(parent, 'a[1]')
+  const data = await discover(root)
+  expect(data.repos.map((r) => [r.path, r.origin])).toEqual([[real(parent), 'top-level'], [real(child), 'container-child']])
+  expect(data.dropped).toEqual([])
+})
+
+test('an ignored child named :x surfaces as a container child, not checked as x', async () => {
+  const root = makeScanRoot()
+  const parent = makeRepoIn(root, 'parent')
+  writeGitignore(parent, ['/:x/'])
+  const child = makeRepoIn(parent, ':x')
+  const data = await discover(root)
+  expect(data.repos.map((r) => [r.path, r.origin])).toEqual([[real(parent), 'top-level'], [real(child), 'container-child']])
+  expect(data.dropped).toEqual([])
+})
+
+// The rows-2-and-3-before-row-4 pins. With --no-index, row 4 no longer asks
+// the index, so a tracked child under an ignored directory is "ignored" to it:
+// hoisting row 4 above rows 2-3 would surface both of these as container
+// children. At HEAD before --no-index the order did not matter.
+test('a vendored child under an ignored vendor/ is still dropped as vendored', async () => {
+  const root = makeScanRoot()
+  const parent = makeRepoIn(root, 'parent')
+  const lib = makeVendoredChild(parent, 'vendor/lib')
+  writeGitignore(parent, ['vendor/'])
+  const data = await discover(root)
+  expect(data.repos.map((r) => r.path)).toEqual([real(parent)])
+  expect(data.dropped).toEqual([{ id: repoId(real(lib)), path: real(lib), name: 'lib', reason: 'vendored' }])
+})
+
+test('a submodule under an ignored mods/ is still dropped as submodule', async () => {
+  const root = makeScanRoot()
+  const parent = makeRepoIn(root, 'parent')
+  const sub = addSubmodule(parent, makeRepoIn(root, 'lib'), 'mods/sub')
+  writeGitignore(parent, ['mods/'])
+  const data = await discover(root)
+  expect(names(data.repos)).toEqual(['lib', 'parent'])
+  expect(data.dropped).toEqual([{ id: repoId(real(sub)), path: real(sub), name: 'sub', reason: 'submodule' }])
+})
+
 test('a candidate whose classification git call times out is reported as timed-out, never as ambiguous', async () => {
   const root = makeScanRoot()
   containerFixture(root)
