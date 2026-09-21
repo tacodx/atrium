@@ -4,7 +4,7 @@ import { basename, join } from 'node:path'
 import {
   cleanupFixtures, makeScanRoot, makeRepoIn, writeGitignore, addWorktree, addSubmodule,
   breakGitPointer, makeZeroByteGitFile, makeVendoredChild, startMergeConflict,
-  startCherryPickConflict, startRebaseConflict, makeSlowGitShim, commitAll,
+  startCherryPickConflict, startRebaseConflict, makeSlowGitShim, makeRevParseExitShim, commitAll,
 } from './fixtures/gitrepo.ts'
 import { resolveGit } from '../src/core/rungit.ts'
 import { reposConfigSchema, type ReposConfig } from '../src/providers/repos/config.ts'
@@ -530,6 +530,53 @@ test('a probe root whose rev-parse times out is reported on the closed set, neve
   } finally {
     process.env.PATH = savedPath
   }
+})
+
+// T7's M11, closed over the exit codes. The gate rejects on ANY non-zero
+// rev-parse exit, not on 128 alone — but every fixture-producible gate failure
+// exits exactly 128, so only a shim can tell the two apart: a real repository
+// whose rev-parse still prints its own `<repo>/.git` (so the containment
+// comparison and the empty-stdout guard would both pass it) but exits `code`.
+// The probe root is not a repository, so its rev-parse prints nothing and is
+// skipped under every code; `proj` is the only candidate the gate can drop.
+// Exit 0 is the control: the same shim, the same repo, accepted.
+const revParseRejectCodes = [1, 2, 128, 129, 255] as const
+
+async function discoverUnderRevParseExit(code: number): Promise<{ proj: string; data: ReposData }> {
+  const root = makeScanRoot()
+  const proj = real(makeRepoIn(root, 'proj'))
+  const savedPath = process.env.PATH
+  try {
+    const realGit = resolveGit()
+    const shimDir = makeRevParseExitShim(realGit, code)
+    // Positive guard: the shim really answers with the repo's own gitdir and
+    // really exits `code`. A shim that printed nothing would let the
+    // empty-stdout guard reject the repo and the pin would hold for the wrong
+    // reason.
+    const probe = Bun.spawnSync([join(shimDir, 'git'), 'rev-parse', '--absolute-git-dir'], { cwd: proj })
+    expect(probe.exitCode).toBe(code)
+    expect(realpathSync(probe.stdout.toString().trim())).toBe(join(proj, '.git'))
+    process.env.PATH = shimDir
+    return { proj, data: await discover(root) }
+  } finally {
+    process.env.PATH = savedPath
+  }
+}
+
+for (const code of revParseRejectCodes) {
+  test(`a repo whose rev-parse prints its gitdir but exits ${code} is dropped as invalid, never accepted`, async () => {
+    const { proj, data } = await discoverUnderRevParseExit(code)
+    expect(data.repos).toEqual([])
+    expect(data.dropped).toEqual([{ id: repoId(proj), path: proj, name: 'proj', reason: 'invalid' }])
+    expect(data.errors).toEqual([])
+  })
+}
+
+test('control: the same rev-parse shim exiting 0 lets the same repo through as top-level', async () => {
+  const { proj, data } = await discoverUnderRevParseExit(0)
+  expect(data.repos.map((r) => [r.path, r.origin])).toEqual([[proj, 'top-level']])
+  expect(data.dropped).toEqual([])
+  expect(data.errors).toEqual([])
 })
 
 // --- Shape and wire contract ------------------------------------------------------------

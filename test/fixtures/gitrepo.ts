@@ -332,6 +332,30 @@ export function makeRecordingGitShim(realGit: string, logFile: string, slowSubco
   return dir
 }
 
+/**
+ * A tracked directory holding an executable named `git` that, for any
+ * invocation naming `rev-parse`, runs the real binary, prints ITS stdout
+ * unchanged and then exits `exitCode` whatever git itself exited; every other
+ * invocation execs the real binary. So a real repository's
+ * `rev-parse --absolute-git-dir` still answers with its own `<repo>/.git` —
+ * plausible, non-empty output — but under an exit code of the caller's
+ * choosing. That is the one shape no fixture can make (every fixture-producible
+ * gate failure exits exactly 128 on git 2.55) and the one that tells a
+ * "non-zero rejects" gate from a "128 rejects" gate (T7's M11). Only shell
+ * builtins besides the absolute `realGit`: the child's PATH is this directory.
+ */
+export function makeRevParseExitShim(realGit: string, exitCode: number): string {
+  if (!Number.isInteger(exitCode) || exitCode < 0 || exitCode > 255) throw new Error(`makeRevParseExitShim: bad exit code ${exitCode}`)
+  const dir = track(mkdtempSync(join(tmpdir(), 'atrium-shim-')))
+  const shim = join(dir, 'git')
+  writeFileSync(
+    shim,
+    `#!/bin/sh\ncase " $* " in *" rev-parse "*) out=$(${realGit} "$@" 2>/dev/null); [ -n "$out" ] && printf '%s\\n' "$out"; exit ${exitCode} ;; esac\nexec ${realGit} "$@"\n`,
+  )
+  chmodSync(shim, 0o755)
+  return dir
+}
+
 /** Reads a recording shim's log as one argv array per invocation (empty when the log does not exist). */
 export function readShimLog(logFile: string): string[][] {
   if (!existsSync(logFile)) return []
