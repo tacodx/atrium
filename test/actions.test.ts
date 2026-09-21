@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { createRegistry } from '../src/core/registry'
 import { dispatch, buildArgv, spawnDetached } from '../src/core/actions'
 import type { Action, Provider } from '../src/core/contract'
+import { INERT_LAUNCHER } from './fixtures/launcher'
 
 const provider = (actions: Provider<any, any>['actions']): Provider<any, any> => ({
   id: 'git',
@@ -177,7 +178,7 @@ describe('the git chokepoint reaches the action layer', () => {
   test('dispatch refuses the exec action rather than spawning it', async () => {
     const r = createRegistry()
     r.register(provider([{ kind: 'exec', id: 'diff', label: 'Diff', argv: () => ({ cmd: 'git', args: ['diff'] }) }]))
-    await expect(dispatch(r, 'git', 'diff', {}, { cfg: {} })).rejects.toThrow(/runGit/)
+    await expect(dispatch(r, 'git', 'diff', {}, { cfg: {}, launcher: INERT_LAUNCHER })).rejects.toThrow(/runGit/)
   })
 })
 
@@ -185,13 +186,13 @@ describe('dispatch', () => {
   test('rejects an unknown action id rather than dispatching dynamically', async () => {
     const r = createRegistry()
     r.register(provider([]))
-    await expect(dispatch(r, 'git', 'nonexistent', {}, { cfg: {} })).rejects.toThrow(/unknown action/i)
+    await expect(dispatch(r, 'git', 'nonexistent', {}, { cfg: {}, launcher: INERT_LAUNCHER })).rejects.toThrow(/unknown action/i)
   })
 
   test('rejects an unknown provider id', async () => {
     const r = createRegistry()
     r.register(provider([]))
-    await expect(dispatch(r, 'nope', 'open', {}, { cfg: {} })).rejects.toThrow(/unknown provider/i)
+    await expect(dispatch(r, 'nope', 'open', {}, { cfg: {}, launcher: INERT_LAUNCHER })).rejects.toThrow(/unknown provider/i)
   })
 
   test('a call action validates its payload at the boundary', async () => {
@@ -201,8 +202,8 @@ describe('dispatch', () => {
       payloadSchema: { parse: (x: any) => { if (typeof x?.text !== 'string') throw new Error('bad payload'); return x } },
       run: async () => {},
     }]))
-    await expect(dispatch(r, 'git', 'capture', { text: 123 }, { cfg: {} })).rejects.toThrow(/bad payload/)
-    await expect(dispatch(r, 'git', 'capture', { text: 'ok' }, { cfg: {} })).resolves.toBeUndefined()
+    await expect(dispatch(r, 'git', 'capture', { text: 123 }, { cfg: {}, launcher: INERT_LAUNCHER })).rejects.toThrow(/bad payload/)
+    await expect(dispatch(r, 'git', 'capture', { text: 'ok' }, { cfg: {}, launcher: INERT_LAUNCHER })).resolves.toBeUndefined()
   })
 
   // Final review I4: run()'s cfg was hardcoded undefined, which makes all four
@@ -216,7 +217,7 @@ describe('dispatch', () => {
       kind: 'call', id: 'capture', label: 'Capture',
       run: async (_target, cfg) => { seen.push(cfg) },
     }]))
-    await dispatch(r, 'git', 'capture', { text: 'x' }, { cfg: { vault: '/home/u/vault', daily: 'journal/%Y-%m-%d.md' } })
+    await dispatch(r, 'git', 'capture', { text: 'x' }, { cfg: { vault: '/home/u/vault', daily: 'journal/%Y-%m-%d.md' }, launcher: INERT_LAUNCHER })
     expect(seen).toEqual([{ vault: '/home/u/vault', daily: 'journal/%Y-%m-%d.md' }])
   })
 
@@ -228,7 +229,7 @@ describe('dispatch', () => {
       kind: 'call', id: 'capture', label: 'Capture',
       run: async (t, c) => { target = t; cfg = c },
     }]))
-    await dispatch(r, 'git', 'capture', { text: 'note' }, { cfg: { vault: '/v' } })
+    await dispatch(r, 'git', 'capture', { text: 'note' }, { cfg: { vault: '/v' }, launcher: INERT_LAUNCHER })
     expect(target).toEqual({ text: 'note' })
     expect(cfg).toEqual({ vault: '/v' })
   })

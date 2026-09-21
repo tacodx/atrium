@@ -12,6 +12,7 @@ import { createRegistry } from '../src/core/registry.ts'
 import { reposConfigSchema, type ReposConfig } from '../src/providers/repos/config.ts'
 import { createReposProvider, reposToClient, type ReposData, type RepoEntry } from '../src/providers/repos/index.ts'
 import { resolveTarget } from '../src/providers/repos/actions.ts'
+import { INERT_LAUNCHER } from './fixtures/launcher.ts'
 
 // Every test builds its own makeScanRoot() and passes it as deps.homeDir; none
 // reads $HOME (§10 rule 1). Every fixture git call runs under CLEAN_ENV (§10
@@ -416,20 +417,8 @@ function action(p: ReturnType<typeof createReposProvider>, id: string) {
   return a
 }
 
-/**
- * An inert stand-in for DispatchOptions.launcher (actions.ts:64), passed by
- * EVERY dispatch below. Each of those dispatches is expected to reject long
- * before spawnDetached is reached — but the whole point of these tests is to
- * be re-run under mutants, and M2/M3 delete exactly the check that makes them
- * reject. Under the DEFAULT launcher ('systemd-run') a mutation run would
- * then open a real editor or terminal on the operator's desktop, silently,
- * once per case. /bin/false STARTS and exits 1, so spawnDetached's fallback —
- * which keys on the `error` event, i.e. on failing to start, never on the
- * exit status (actions.ts:104-108) — does not fire, and nothing is launched.
- * An absent path would be WORSE than the default: failing to start is exactly
- * what triggers the bare, unscoped relaunch of the command itself.
- */
-const INERT_LAUNCHER = '/bin/false'
+// INERT_LAUNCHER: see test/fixtures/launcher.ts, and the rule pinning it in
+// test/launcher-pin.test.ts.
 
 // M15 (table/config captured by value at construction).
 test("each action's argv places its own -- or option flag before the repo path", async () => {
