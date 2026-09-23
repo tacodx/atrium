@@ -3,7 +3,9 @@
 Everything Plan 2 (`feat/first-light`) knowingly left open, and every item it carried, reconciled. Written by
 Task 10c, the last unit of Plan 2, at `4f7956c` plus the three text corrections that precede this document.
 Corrected on 2026-09-23 after review (18 findings, all documentation accuracy), with every line citation the
-review named re-derived against `91b2147`, the tree that holds ADR 0003 (e)'s addendum.
+review named re-derived against `91b2147`, the tree that holds ADR 0003 (e)'s addendum. Updated the same day after
+the TLS spike (Plan 3 units 0a and 0b): every ADR 0001 citation, and the ADR 0003 and spec citations that `9c91b00`'s
+inserted lines moved, is re-derived against `9c91b00`, the commit that holds ADR 0001's TLS measurement.
 
 Plan 2's working notes (the ledger, briefs and reports under `.superpowers/sdd/`) are untracked by design: that
 directory's own `.gitignore` is `*`. Citations below of the form `ledger:NNN` point into
@@ -21,25 +23,49 @@ The appendix is the reconciliation: one row per item carried during Plan 2, with
 One standalone measurement, about 30 minutes, before any mail work: a real TLS handshake to `imap.gmail.com:993` on
 bun 1.3.11, with and without `resolveDualStack`, asserting a non-empty peer certificate, with the connected address
 family recorded. The reference machine runs Mullvad with IPv6 blocked (`mullvad tunnel get`: `IPv6: off`), so
-"which family answered" is part of the result, not a detail. Replace ADR 0001's "Not measured" section
-(`docs/decisions/0001-bun-version.md:31-61`) with the outcome.
+"which family answered" is part of the result, not a detail. Done 2026-09-23: ADR 0001's "Not measured" section is
+now "TLS — not measured at adoption; measured 2026-09-23" (`docs/decisions/0001-bun-version.md:44-215` at `9c91b00`),
+retitled and closed by a **Measurement (2026-09-23)** block (`:90-215`); every original sentence stays under a dated
+bracket rather than being replaced.
 
-Today `src/net/tls-connect.ts` is imported only by its own test (`test/tls-helper.test.ts:2`), whose two cases
-inject their own `probe`, so no socket is ever opened and no certificate is inspected anywhere in the repo. The
-module's real probe is a plain `node:net` connect. If the handshake fails, `engines.bun` (`>=1.3.11`) moves, which
-is a plan-shaping fact and the reason this goes first.
+Until unit 0a, `src/net/tls-connect.ts` was imported only by its own test (`test/tls-helper.test.ts:2`), whose two
+cases inject their own `probe`, so no socket was ever opened and no certificate was inspected anywhere in the repo.
+The module is now also imported by the live test (`test/tls-live.test.ts:5`) and the spike script
+(`scripts/tls-spike.ts:28`), with no production call site until mail. The module's real probe is a plain `node:net`
+connect. Had the handshake failed, `engines.bun` (`>=1.3.11`) would have moved, which is a plan-shaping fact and the
+reason this went first.
 
-**ADR 0001 is wrong about when this happens.** `0001-bun-version.md:49` says "there is none yet — mail is Plan 2",
-and `:59` says "Taking the live handshake belongs to Plan 2's mail task". Plan 2 deferred the handshake for the
-whole plan (plan `:362-363`, `:5545-5547`) and shipped no mail provider. The Plan 3 spike supersedes both lines.
-ADR 0001 is not edited here; the spike's own ADR update is where those two lines get replaced.
+**ADR 0001 was wrong about when this happens.** `0001-bun-version.md:62` says "there is none yet — mail is Plan 2",
+and `:78` says "Taking the live handshake belongs to Plan 2's mail task". Plan 2 deferred the handshake for the
+whole plan (plan `:362-363`, `:5545-5547`) and shipped no mail provider. Both lines now carry a dated correction
+(`0001:63-68`, `:82-85`, commit `9c91b00`); the sentences themselves stay.
+
+**Outcome (measured 2026-09-23; the record is ADR 0001's "TLS — not measured at adoption; measured 2026-09-23",
+`0001:90-215`).** bun 1.3.11 completes the handshake through `resolveDualStack` every time, over IPv4, with an
+authorized 17-key certificate for the host. The bare `tls.connect` fails on this network with
+`ERR_TLS_CERT_ALTNAME_INVALID` and a null peer certificate at ~255-280 ms: when the 250 ms attempt timer fires while
+the first address (an AAAA that Mullvad with IPv6 off refuses at ~1 s) is still pending, bun raises on that socket
+and never tries the next address; node 22 is unaffected. The floor stays at `>=1.3.11` and now rests on three of
+three load-bearing questions; the workaround is mandatory on this version wherever the first address fails slower
+than 250 ms. Pinned by `test/tls-live.test.ts` under `ATRIUM_LIVE_TLS=1`: "resolveDualStack then tls.connect to
+imap.gmail.com:993 yields a non-empty, authorized peer certificate for the host" (spec §7.3's integration test) and
+"bug pin: on this bun a bare tls.connect whose first address is still pending at the 250 ms attempt timer fails with
+ERR_TLS_CERT_ALTNAME_INVALID and a null peer certificate — retire resolveDualStack when this goes red on a newer
+bun" (its retirement trigger). Without the variable both skip, and `test/verify-gate.test.ts`'s "the suite skips
+exactly the two opt-in live TLS tests, and that file exists" pins that they are the suite's only skips (ADR 0003 (b)
+addendum, `0003:161-164`). `scripts/tls-spike.ts` regenerates the ADR's table under either runtime. Retirement
+procedure (`0001:181-194`): the bug pin red on bun X ⇒ raise `engines.bun` to X, move `ci.yml`'s `bun-version` and
+the verify-gate literals with it, delete `resolveDualStack`; the handshake test keeps guarding the certificate. One
+decision is left to the mail task: the workaround's probe is serial and costs ~2.1 s per connect here (both AAAA
+refusals before the first A answers) ahead of a ~115 ms handshake — a parallel probe or a remembered winner would
+remove it (`0001:161-167`; appendix A20). Commits: `720b9ff`, `1c2cac6`, `fdf7cff` (unit 0a), `9c91b00` (the record).
 
 ## 2. The secrets adapter's required shape
 
-From §8.5 of the design spec (`docs/superpowers/specs/2026-09-13-atrium-design.md:438-448`) plus ADR 0001:153-161.
+From §8.5 of the design spec (`docs/superpowers/specs/2026-09-13-atrium-design.md:446-456`) plus ADR 0001:313-321.
 No adapter exists yet: nothing under `src/`, `scripts/` or `test/` calls `Bun.secrets`.
 
-- Every `Bun.secrets` call is wrapped in `Promise.race` with a timeout, never a bare try/catch. ADR 0001:153-161
+- Every `Bun.secrets` call is wrapped in `Promise.race` with a timeout, never a bare try/catch. ADR 0001:313-321
   records that a raced-away call is **not** inert: it can still complete or fail later. So the adapter must
   neither assume cancellation nor leave a handler that writes state after the timeout has been reported.
 - The fallback is a 0600 file in a 0700 directory.
@@ -49,22 +75,24 @@ No adapter exists yet: nothing under `src/`, `scripts/` or `test/` calls `Bun.se
 - Read lazily, with retry. Never eagerly.
 
 `keyring ok` in ADR 0001 is machine-specific evidence and says nothing about any other environment: the keyring
-is optional, never guaranteed. **Correction to ADR 0001 (`:24-25`, `:155-156`) and to the plan's wording
+is optional, never guaranteed. **Correction to ADR 0001 (`:30-31`, `:315-316`) and to the plan's wording
 (`:5335-5336`):** on the reference machine the keyring is the freedesktop **Secret Service API via libsecret,
 served by KDE's ksecretd/KWallet — not GNOME**. Measured: `busctl --user status org.freedesktop.secrets` names
 `/usr/bin/ksecretd` (package `kf6-kwallet`), `gnome-keyring` is not installed, and the session is KDE Plasma on
-Wayland. Spec §8.5 already says "libsecret/KWallet" (`spec:441-442`). ADR 0001 is not edited here.
+Wayland. Spec §8.5 already says "libsecret/KWallet" (`spec:449-450`). ADR 0001 is not edited here. [2026-09-23: ADR
+0001 now carries this as dated brackets beside both lines (`0001:32-38`, `:322-327`, commit `9c91b00`); the plan's
+`:5335-5336` still says GNOME.]
 
-ADR 0001:154 assigns the build to "Plan 4's credential-store task". That numbering predates the current plans; the
+ADR 0001:314 assigns the build to "Plan 4's credential-store task". That numbering predates the current plans; the
 adapter is owed by whichever plan first needs a stored credential, which under section 3's ordering is not
-Plan 3's first provider.
+Plan 3's first provider. [2026-09-23: recorded beside that line in ADR 0001 as a dated bracket (`0001:328-330`).]
 
 ## 3. The claude port's forbidden-export grep, the redaction test, and the ordering
 
 **The grep.** A test that greps the source tree and fails if any of `getAccessToken`, `refreshToken`,
 `writeBackCredentials`, `getGauges` appears in `src/`. None does today, and no such test exists yet.
 
-Rationale, from §7.4 (`spec:357`): Atrium's use of Claude credentials is **read-only** — it never refreshes and
+Rationale, from §7.4 (`spec:365`): Atrium's use of Claude credentials is **read-only** — it never refreshes and
 never writes. Upstream's `getGauges` calls `getAccessToken`, whose read-modify-write of
 `~/.claude/.credentials.json` rotates a refresh token the running Claude Code process also holds, forcing the user
 to re-authenticate. The plan called this "not verifiable from this repo". It is not verifiable from *atrium*, but a
@@ -72,11 +100,12 @@ local checkout of tacodx/TacosPlugins at `27d15ae` confirms it: `packages/core/u
 `:157` awaits `getAccessToken`, and `auth.mjs:107` defines `getAccessToken`, which calls `refreshToken` (`:116`)
 and `writeBackCredentials` (`:119`).
 
-**The redaction test**, paired with it (`spec:385-387`): nothing reaching the HTTP/WS layer may contain
+**The redaction test**, paired with it (`spec:393-395`): nothing reaching the HTTP/WS layer may contain
 `accessToken`, `refreshToken`, or the raw payload (which carries spend, per-surface breakdowns, subscription type
 and rate-limit tier).
 
-**The ordering ruling: claude next, then obsidian. Not mail** — mail needs §8.5 and the unmeasured TLS. This rests
+**The ordering ruling: claude next, then obsidian. Not mail** — mail needs §8.5 and the probe-cost decision (§1).
+This rests
 on the scoping document's default (`2026-09-14-plan-2-scoping.md:243`, open question 4) and the plan
 (`:5348-5349`), not on an ADR.
 
@@ -198,8 +227,16 @@ returns the full repo list, not a fragment".
 - ADR 0002 Ruling C cites `src/core/scheduler.ts:25` and `:63`; the lookups are now the `p.fetch(cfgFor(...))`
   call in `runNow` (`:195`) and the `configFor` accessor (`:310`).
 - ADR 0002 Ruling G cites `main.tsx:48`; the call site is now `:50`.
-- ADR 0001 `:24-25` and `:155-156` (and plan `:5335-5336`) say GNOME; see section 2. ADR 0001 `:49`/`:59`; see
-  section 1. ADR 0001 `:122-125` still says there is no CI.
+- ADR 0001 `:30-31` and `:315-316` say GNOME (section 2), `:62`/`:78` assign the TLS handshake to Plan 2 (section 1)
+  and `:276-279` say there is no CI: all five carry a dated bracket since `9c91b00` (`0001:32-38`, `:322-327`;
+  `:63-68`, `:82-85`; `:280-285`), the sentences themselves unchanged. The plan's `:5335-5336` still says GNOME.
+- Plan-2 documents whose ADR 0001 line citations `9c91b00`'s inserted lines made stale, none on this unit's edit
+  list: `scoping:188` and plan `:5327-5328` cite `0001:153-161` (the keyring paragraph, now `:313-321`);
+  `scoping:227` cites `0001:33-52` (Correction 1 through "guards.", now `:46-71`, with a bracket at `:63-68` inside
+  it); `cf2:108-111` cites no line but says ADR 0001 "carries three dated corrections" and the TLS behaviour "was
+  never measured" — there are four correction rounds now, and the measurement is taken. The same commit moved spec
+  lines after `:318` by 8 and after `:644` by 11, so ADR 0002 Ruling D's note (`0002:237`) citing
+  `spec:488-491` now points at `:496-499` (that note itself says to re-resolve by content).
 - The plan cites `scripts/assert-package.ts:108-113` (`:3086`, `:4937`, `:5040`, `:5274`) for the Tailwind
   canary, which is now at `:166-178`; separately, its `:84-92` (`:5379`) is the "gate that went vacuous" note, not
   the canary, and that note is now at `:149-157` (ADR 0003's table, `0003:34`, maps it the same way).
@@ -215,8 +252,8 @@ returns the full repo list, not a fragment".
 **4.12 Operational.**
 - No `ci.yml` step has yet run on a GitHub runner. The push happened on 2026-09-21: `origin/feat/first-light` is
   `11ede55` (after `ci.yml`, `f35c2f9`), and it triggered run 35644633756, which GitHub refused to start on the
-  account's billing state before any step ran. ADR 0003 (e)'s dated addendum records this (`0003:237-252`); the
-  first real run's result is still owed there (`0003:235`), and unblocking it is the owner's action in GitHub's
+  account's billing state before any step ran. ADR 0003 (e)'s dated addendum records this (`0003:242-257`); the
+  first real run's result is still owed there (`0003:240`), and unblocking it is the owner's action in GitHub's
   Billing & plans.
 - The stale `/tmp/atrium-*` entries from before the P3 fix were removed out of band on 2026-09-21; the controller
   counted 0 on 2026-09-23. No longer open (appendix K15).
@@ -231,8 +268,11 @@ returns the full repo list, not a fragment".
   `newFileLocation` `root`, zero date-named notes at the root and three in `00 Inbox` (scoping `:243`).
 - §7.4's four-way status envelope (`ok | stale(age) | unavailable(reason) | unsupported-shape`) arrives with the
   claude provider.
-- `src/net/tls-connect.ts` is dead code, and `resolveDualStack`'s doc comment (`:24-31`) overstates what its test
-  guards. Settle both with section 1.
+- `resolveDualStack`'s doc comment was corrected in unit 0a (`720b9ff`; now `src/net/tls-connect.ts:24-50`, stating
+  the measured bug, the environment, the cost, which test guards which half, and the retirement procedure). The
+  module still has no production call site — the two opt-in live tests and the unwired spike script are not call
+  sites — until the mail task registers the first one, and two decisions ride with it: the serial probe's ~2.1 s cost
+  (appendix A20) and whether to report the bun 1.3.11 bug upstream (appendix A21).
 
 ---
 
@@ -257,7 +297,7 @@ document's commit.
 | A2 | I6: the scheduler was never started | cf2:27-30 | closed | `e727696`, `b7b892a`, `98edc07`. "server.stop() stops the scheduler"; "SIGTERM stops the scheduler, not just the endpoint file" |
 | A3 | I7: the handoff was unwired, so no path issued a session token | cf2:31-33 | closed | `5c95ac1`, `f526288`. "a handoff redeemed at POST /api/session returns a session token that is accepted by /api/state". Browser launch is E35 |
 | A4 | `snapshot()` had no redaction seam; T5 deferred the literal WS-frame sentinel test to T6 | cf2:34-35; ledger:845 | closed | `dd16426`, `3ae453f`, `17c1234`. "GET /api/state serves the redacted client value, not the provider Data"; "a Data sentinel never reaches a WS update frame". Only `Data` is redacted; see F6 |
-| A5 | No CI; enforcement was local only (ADR 0001 Correction 2) | cf2:36 | closed | `f35c2f9`, `6281c07`, `8967542`. "CI runs the verify gate, not a bare test run"; "CI pins bun to the engines floor". First run is K7; `0001:122-125` stale (§4.11) |
+| A5 | No CI; enforcement was local only (ADR 0001 Correction 2) | cf2:36 | closed | `f35c2f9`, `6281c07`, `8967542`. "CI runs the verify gate, not a bare test run"; "CI pins bun to the engines floor". First run is K7; `0001:276-279` carries a dated bracket since `9c91b00` (`:280-285`) |
 | A6 | P1: systemd-run present with no user bus makes an exec action a silent no-op | cf2:40-45 | ruled | ADR 0002 Ruling E (`0002:429-474`, `5521e9b`), accepted for this slice; owed forward with §4.1 (`0002:471-474`: the next plan that touches `src/core/actions.ts` picks it up with Ruling B's result channel). Taken from source, not re-measured (task-8-report.md:261-263) |
 | A7 | P2: `bun run typecheck` failed on a fresh clone (gen:assets on a gitignored `web-dist`) | cf2:46-50 | closed | `96631c5`. "--allow-empty writes a stub manifest so a fresh clone can typecheck"; "a missing web-dist fails with the friendly message, not an ENOENT stack trace" |
 | A8 | P3: the suite littered `/tmp` (rungit, then actions); T7 and T10 each pointed at the other | cf2:51-56 | closed | `77439a9` (C6), `d7d2419`. "${file} leaves nothing behind in a fresh TMPDIR" (for `./test/rungit.test.ts`); "no test source hands mkdtemp a hard-coded /tmp prefix". The ledger's "list it as open" (ledger:1344-1345) is superseded. Host litter is K15 |
@@ -268,10 +308,12 @@ document's commit.
 | A13 | cf2 §4: the hooks-dir ownership check's uid refusal is unpinned | cf2:93-94 | open | §4.10. `src/core/rungit.ts:40-41` checks `st.uid`; no test makes a wrong-uid directory |
 | A14 | cf2 §4: `--no-optional-locks` is a runGit prefix global and never supplied from a call site | cf2:95-97 | closed | `049e85e`. "the metadata argv is exactly the three declared shapes, with no caller-supplied --no-optional-locks"; "runs the git it resolved from PATH, with --no-optional-locks before the subcommand" |
 | A15 | M8: auth's "wrong scheme" case did not exist although the test title names it | cf2:98-99 | closed | `c693062`. "rejects a missing header, a wrong scheme, and a wrong token" |
-| A16 | The TLS measurement was never taken; ADR 0001 `:49`/`:59` assign it to Plan 2 | cf2:108-111; 0001:33-61 | open | §1 (spike first) and §4.11. `src/net/tls-connect.ts` untouched since `cf66425`; only its own test imports it, and both cases inject `probe` |
-| A17 | `src/net/tls-connect.ts` is dead code; `resolveDualStack`'s comment overstates its test | 0001:43-52 | open | §4.13. Comment at `tls-connect.ts:24-31` unchanged |
+| A16 | The TLS measurement was never taken; ADR 0001 `:62`/`:78` assign it to Plan 2 | cf2:108-111; 0001:46-80 | closed | `720b9ff`, `1c2cac6`, `fdf7cff` (unit 0a), `9c91b00` (ADR 0001's record). "resolveDualStack then tls.connect to imap.gmail.com:993 yields a non-empty, authorized peer certificate for the host". Measured 2026-09-23: the handshake completes through the workaround, over IPv4, on bun 1.3.11; the floor stays (§1). The two ADR lines carry dated corrections (`0001:63-68`, `:82-85`) |
+| A17 | `src/net/tls-connect.ts` is dead code; `resolveDualStack`'s comment overstates its test | 0001:56-71 | ruled | The comment was corrected in unit 0a (`720b9ff`; now `src/net/tls-connect.ts:24-50`). The module stays dead until the mail task registers the first production call site — two opt-in live tests and an unwired spike script are not call sites (§4.13) |
 | A18 | No git remote; this machine held the only copy | ledger:288 | ruled | Resolved out of band (ledger:479-482): `origin` is `github.com/tacodx/atrium`. An environment fact, so nothing can pin it |
-| A19 | ADR 0001: a bun 1.4.x upgrade could retire `scripts/gen-assets.ts` once `--asset` is confirmed | 0001:90-93 | ruled | A revisit-on-upgrade trigger. `engines.bun` is still `>=1.3.11` |
+| A19 | ADR 0001: a bun 1.4.x upgrade could retire `scripts/gen-assets.ts` once `--asset` is confirmed | 0001:244-247 | ruled | A revisit-on-upgrade trigger. `engines.bun` is still `>=1.3.11` |
+| A20 | `resolveDualStack` probes the candidates serially with a 2 s-timeout plain TCP connect: ~2.1 s per connect here (both AAAA refusals at ~1 s each before the first A answers), ahead of a ~115 ms handshake | 0001:161-167 | open | §4.13. Owner: the mail task — a parallel probe or a remembered winner would remove it; acceptable for one connection per account at a 60 s poll (spec §7.3). Not changed by the spike |
+| A21 | The bun 1.3.11 bug (attempt-timer expiry on a still-pending first address ⇒ `ERR_TLS_CERT_ALTNAME_INVALID`, null peer certificate, no next address) has no upstream report; oven-sh/bun#31950 is adjacent, not it | 0001:212-215 | open | §4.13. Owner: none; decide file-or-not. #41447 not examined |
 
 ### B. Task 1 (`runGit`, ADR 0002 Rulings A-D)
 
@@ -284,7 +326,7 @@ document's commit.
 | B5 | Ruling B's `actions.ts`/`routes.ts` citations and its `ExecFileException` deprecation claim were unverified | ledger:61-63 | ruled | Re-verified at `4f7956c`: the source citations resolve, and `@types/node` 26.5.1 marks `ExecFileException` deprecated. Its test citations drifted (B1) |
 | B6 | Spec §8.9's `connect-src` differs from the shipped CSP (which also allows `ws://localhost`) | ledger:36-37 | ruled | Recorded divergence at `0002:228-231`. Its stale spec and file citations are corrected by the Ruling D note appended in this task (`a0aa6fb`) |
 | B7 | Ruling A: a quoted git literal trips the tripwire even in a comment | 0002:63-65 | ruled | Standing constraint, enforced by "no source file calls git outside runGit (tripwire, not a proof)" and "the real src/ tree is clean under all four layers" |
-| B8 | Ruling D's citations of `src/server/serve.ts:11-17` and the `scripts/assert-package.ts` fetch lines are stale | task-10a-report.md:153-154 | ruled | Text-only: a dated old → new correction appended to Ruling D in `a0aa6fb` (`:36-42`; `:92`, `:140`, `:161`, `:184`; spec `:488-491`) |
+| B8 | Ruling D's citations of `src/server/serve.ts:11-17` and the `scripts/assert-package.ts` fetch lines are stale | task-10a-report.md:153-154 | ruled | Text-only: a dated old → new correction appended to Ruling D in `a0aa6fb` (`:36-42`; `:92`, `:140`, `:161`, `:184`; spec `:488-491`, which `9c91b00` moved to `:496-499`) |
 
 ### C. Task 2 (scheduler lifecycle and serve wiring)
 
@@ -400,7 +442,7 @@ document's commit.
 | G6 | Mutants that set `connected` true on an error frame are RED only on `8ead746`'s pin, equivalent under production wiring | ledger:1593-1595 | ruled | Ruled equivalent by the F1 regression checker; recorded here because only the untracked ledger held it |
 | G7 | T6 M5 withdrawn: registering the publisher after `start()` is wrong only once `start()` is synchronous | plan:3374 | ruled | Withdrawn in the T6 addendum |
 | G8 | `postAction` and `getState` are exported but untested; `getState` has no call site | task-6-report.md:353 | open | §4.9. `postAction` is reached only via `postReposAction` and pinned as text |
-| G9 | Nothing uses a real browser: CSP-vs-Tailwind, localStorage `SecurityError` and live WS behaviour are unobserved | task-6-report.md:326-329 | ruled | Structural: ADR 0002 Ruling D Property 2 and ADR 0003 (d) (`0003:223-225`) |
+| G9 | Nothing uses a real browser: CSP-vs-Tailwind, localStorage `SecurityError` and live WS behaviour are unobserved | task-6-report.md:326-329 | ruled | Structural: ADR 0002 Ruling D Property 2 and ADR 0003 (d) (`0003:228-230`) |
 
 ### H. Task 7 (repos discovery)
 
@@ -487,13 +529,13 @@ document's commit.
 | K2 | The verify chain and CI pin had to be non-hollow and un-evadable | ledger:1250-1251 | closed | `b2e51d4` … `8967542`. "verify chains build, the packaging assertion, the test run and typecheck, in that order"; "every stage named in verify is a real script"; "package.json scripts are exactly the reviewed verify chain"; "CI runs on its own: push and pull_request triggers under on:" |
 | K3 | `actions/checkout@v4` runs on node20, which leaves GitHub runners on 2026-09-23 | ledger:1305-1306 | closed | `f35c2f9` (`@v5`). ".github/workflows/ci.yml is exactly the reviewed workflow"; sourcing at `0003:141-149` |
 | K4 | Known limits of the structural spawn scan, and the convergence rule | ledger:1409-1419 | ruled | `0003:95-113` (`357cbf5`, `90ab462`) |
-| K5 | P-1: the plan's "no git remote" premise was false | ledger:1265-1269 | ruled | `0003:227-235` (`b5eb99d`) |
-| K6 | P-3: re-measure every reference number instead of copying them | ledger:1273-1274 | ruled | `0003:161-186`, `:263-274` (`b5eb99d`) |
-| K7 | CI has never executed; ADR 0003 (e) owes the first real run's result | ledger:1245-1246 | open | §4.12. Pushed 2026-09-21: `origin/feat/first-light` = `11ede55`, which triggered run 35644633756; GitHub refused to start the job on the account's billing state, so no `ci.yml` step has run on a runner (`0003:237-252`). The real run is still owed (`0003:235`); unblocking it is the owner's action |
+| K5 | P-1: the plan's "no git remote" premise was false | ledger:1265-1269 | ruled | `0003:232-240` (`b5eb99d`) |
+| K6 | P-3: re-measure every reference number instead of copying them | ledger:1273-1274 | ruled | `0003:166-191`, `:268-279` (`b5eb99d`) |
+| K7 | CI has never executed; ADR 0003 (e) owes the first real run's result | ledger:1245-1246 | open | §4.12. Pushed 2026-09-21: `origin/feat/first-light` = `11ede55`, which triggered run 35644633756; GitHub refused to start the job on the account's billing state, so no `ci.yml` step has run on a runner (`0003:242-257`). The real run is still owed (`0003:240`); unblocking it is the owner's action |
 | K8 | 10a brief v2 doc corrections (401s not a blank page; quote `gate.ts:5-7`; `changeOrigin`; CI runner reliance) | ledger:1323-1329 | ruled | Text-only, `b5eb99d`, `7092fea`, `242f497` |
-| K9 | ADR 0003 (d): widening `gate.ts` or adding a Vite proxy is forbidden | plan:5292-5306 | ruled | Standing prohibition in `0003:188-225` |
+| K9 | ADR 0003 (d): widening `gate.ts` or adding a Vite proxy is forbidden | plan:5292-5306 | ruled | Standing prohibition in `0003:193-230` |
 | K10 | The plan's carry-forward "Still open" list is incomplete | ledger:1340-1341 | ruled | Section 4 of this document, fed by this appendix |
-| K11 | The keyring is Secret Service via libsecret served by KDE ksecretd/KWallet, not GNOME | ledger:1342-1343 | ruled | Stated in §2 of this document with the measurement. ADR 0001 `:24-25`, `:155-156` and plan `:5335-5336` still say GNOME (§4.11) |
+| K11 | The keyring is Secret Service via libsecret served by KDE ksecretd/KWallet, not GNOME | ledger:1342-1343 | ruled | Stated in §2 of this document with the measurement. ADR 0001 `:30-31` and `:315-316` carry dated corrections since `9c91b00` (`:32-38`, `:322-327`); plan `:5335-5336` still says GNOME (§4.11) |
 | K12 | Closeout limitations F2-F5: `:/x` omitted, lexical per-file binding scan, looser-than-tsc resolver, and the F5 `/tmp` scan missing a variable-bound literal, `/var/tmp`, and `mkdirSync` | ledger:1573-1575 | ruled | Terminal condition "documented, not chased" (task-10-closeout-fix-report.md:127-143). In-tree notes at `test/repos-discovery.test.ts:402-403`, `test/launcher-pin.test.ts:18-33`, `test/web-lib-imports.test.ts:32-33`; the F5 misses and F3's cross-file forwarding case are tracked only here, and the unmeasured magic words `:(icase)`, `:(glob)`, `:(attr:…)`, `:(exclude)` are covered only by the shared `:`-prefix pins (task-10-closeout-fix-report.md:129-131) |
 | K13 | Bun 1.3.11's `realpathSync` throws ENOENT on a directory whose name contains a backslash | ledger:1571-1572 | ruled | Worked around at `test/repos-discovery.test.ts:425-426` (`e7fd074`); no upstream report tracked |
 | K14 | The tmp-hygiene test re-runs `rungit.test.ts` in a child on every run (~+0.55 s) | task-10-closeout-report.md:253 | ruled | Accepted as the cost of the P3 pin |
@@ -512,7 +554,7 @@ document's commit.
 
 | # | Item | First carried | Disposition | Evidence |
 |---|---|---|---|---|
-| L1 | §8.5 secrets adapter shape | scoping:188, :228; 0001:153-161 | open | §2 and §4.5. No `Bun.secrets` call in the tree |
+| L1 | §8.5 secrets adapter shape | scoping:188, :228; 0001:313-321 | open | §2 and §4.5. No `Bun.secrets` call in the tree |
 | L2 | First run (`detect()` → confirm → persist) deferred; `detect()` has no caller | scoping:229 | open | §4.2 |
 | L3 | `show diff` deferred; a result channel is a contract change | scoping:230, :241 | open | §4.1 |
 | L4 | Per-schedule keying of `last` | scoping:231 | open | §4.3. `scoping:231`'s `scheduler.ts:5,37` citation is stale; `last` is at `:24` |
