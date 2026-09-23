@@ -234,6 +234,23 @@ ubuntu:24.04, checkout inside `$HOME`, `XDG_RUNTIME_DIR` unset, with git 2.43.0 
 limits — 13 `bun test` runs, 287/0 every time. That run predates this task's edits and did not exercise the
 node24 checkout. **The first real run's result is to be recorded here when it happens.**
 
+**Addendum (2026-09-23).** The next push happened on 2026-09-21: `origin/feat/first-light` moved from 5f15053
+to 11ede55 (45 commits) and triggered workflow run 35644633756 — name `verify`, event `push`, created
+2026-09-21T19:24:40Z, head SHA 11ede55. The job did not execute. GitHub refused to start it; the run's failure
+annotation, which `gh run view` attributes to `verify: .github#1`, reads: `The job was not started because
+recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing &
+plans' section in your settings`. The job is recorded as failed after 3 s with no log: `gh run view 35644633756
+--log-failed` answers `log not found: 106481972156`, because no step ever produced one. So no step of `ci.yml`
+has yet run on a GitHub runner — not `actions/checkout@v5` on node24, not `oven-sh/setup-bun@v2`, not
+`bun install --frozen-lockfile`, not `bun run verify`. **The first real run's result is therefore still owed to
+this section.** Nothing about the workflow or the repository is known to be wrong from this run — it was refused
+before any step ran — and the evidence that it will pass remains the container run above. Unblocking it is the
+owner's action in GitHub's Billing & plans, outside the repository. The same run carried a second, notice-level
+annotation, which `gh` prints as `"The ubuntu-latest label will migrate to Ubuntu 26 beginning October 19, 2026.
+For more information, see https://github.com/actions/runner-images/issues/14748"`. The runner facts in (b) — git
+2.55.0 from the git-core PPA, `XDG_RUNTIME_DIR=/run/user/1001`, node 22.23.2 — were read from the ubuntu 24.04
+image and must be re-read once `ubuntu-latest` points at 26.
+
 ## (f) Carry-forward P4 — closed
 
 `test/rungit.test.ts`'s `'a symlink standing in for the hooks directory is refused, not followed'` now also
