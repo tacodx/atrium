@@ -1,5 +1,7 @@
 // TLS spike: the handshake measurement behind docs/decisions/0001-bun-version.md's
-// 2026-09-23 TLS measurement, whose summary table this script printed.
+// 2026-09-23 TLS measurement, whose summary table an earlier revision of this
+// script printed (that table shows certAtErr:0; the null-cert correction made
+// it null).
 //
 // It opens REAL sockets to imap.gmail.com:993 — one TLS handshake per probe,
 // eighteen probes in all — and needs a network. Every probe exercises the same
@@ -16,9 +18,11 @@
 //   node scripts/tls-spike.ts
 //
 // Deliberately NOT in package.json's scripts: it is a measurement, not a gate,
-// and test/verify-gate.test.ts pins that object exactly. ADR 0001's earlier
-// "throwaway probe" is why its TLS row stayed unreproducible for a year; this
-// file exists so the table can be regenerated from the tree.
+// and test/verify-gate.test.ts pins that object exactly. ADR 0001's TLS row had
+// no measurement at all until 2026-09-23 — its Correction 1 says no handshake
+// was ever performed, and a unit test over fakes was the only thing behind it —
+// while its embedding row rests on a throwaway probe nobody can re-run. This
+// file exists so the TLS table can be regenerated from the tree.
 import { lookup } from 'node:dns/promises'
 import { connect as tlsConnect } from 'node:tls'
 import { resolveDualStack } from '../src/net/tls-connect.ts'
@@ -133,8 +137,11 @@ for (let i = 1; i <= 3; i++) {
   }
 }
 
-// certAtErr: 'null' when getPeerCertificate() returned null at the error (bun
-// 1.3.11's shape), otherwise the key count; '-' for rows that did not error.
+// certAtErr: 'null' when getPeerCertificate() returned null at the error,
+// otherwise the key count; '-' for rows that did not error. null is both
+// runtimes' pre-handshake shape (ECONNREFUSED rows print null too); bun
+// 1.3.11's distinctive shape is null at an ERR_TLS_CERT_ALTNAME_INVALID error
+// on a socket with pending: true.
 console.log('\n== summary ' + runtime + ' ==')
 for (const r of out) console.log(
   String(r.label).padEnd(30), String(r.outcome).padEnd(16), String(r.remoteFamily ?? '-').padEnd(5), String(r.remoteAddress ?? '-').padEnd(26),

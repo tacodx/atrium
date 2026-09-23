@@ -533,11 +533,14 @@ for (const [exitCode, PORT] of [[0, 7445], [1, 7442]] as const) {
 // are counted per file over every test source, fixtures included, this file
 // excepted, and the map is pinned exactly. Each needle is assembled from
 // parts so this file's own text would not match even if it were scanned.
+// The shapes: skipIf on test/describe/it, todo on test/describe/it, any
+// `.skip` call, and any `.only` call — a stray .only silently switches every
+// other test in its file off, which the summary line likewise does not show.
 //
 // Convergence rule, as ADR 0003 (a) states it for the spawn scan: a skip
-// shape not in this list and not in the tree (`test.if(false)`, a `.skip`
-// reached through an alias) is a known limitation, not a reason for another
-// round; a shape present in the tree gets added.
+// shape not in this list and not in the tree (`test.if(false)`, `.todoIf`,
+// `.failing`, a `.skip` reached through an alias) is a known limitation, not
+// a reason for another round; a shape present in the tree gets added.
 const SKIP_SHAPES = [
   ['test', 'skipIf('],
   ['describe', 'skipIf('],
@@ -545,12 +548,15 @@ const SKIP_SHAPES = [
   ['', 'skip('],
   ['test', 'todo('],
   ['describe', 'todo('],
+  ['it', 'todo('],
+  ['', 'only('],
 ].map(([head, tail]) => `${head}.${tail}`)
 
 function skipCounts(): Record<string, number> {
   const self = join('test', 'verify-gate.test.ts')
   const out: Record<string, number> = {}
-  for (const file of tsFilesUnder('test').filter((f) => f.endsWith('.ts') && f !== self)) {
+  // tsFilesUnder already returns .ts and .tsx; a .test.tsx with a skip must count.
+  for (const file of tsFilesUnder('test').filter((f) => f !== self)) {
     const src = readFileSync(file, 'utf8')
     const n = SKIP_SHAPES.reduce((acc, shape) => acc + src.split(shape).length - 1, 0)
     if (n > 0) out[file] = n
@@ -560,6 +566,6 @@ function skipCounts(): Record<string, number> {
 
 test('the suite skips exactly the two opt-in live TLS tests, and that file exists', () => {
   const live = join('test', 'tls-live.test.ts')
-  expect(existsSync(live)).toBe(true)
-  expect(skipCounts()).toEqual({ [live]: 2 })
+  expect(existsSync(live), 'test/tls-live.test.ts is gone: the suite would print "0 skip" and turn nothing red, so the opt-in live tests would vanish silently').toBe(true)
+  expect(skipCounts(), 'the skip count is the only thing separating opt-in live tests skipped by design from a test silently switched off; add or remove a skip shape here in the same commit').toEqual({ [live]: 2 })
 })

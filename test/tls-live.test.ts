@@ -4,9 +4,10 @@ import { connect as netConnect } from 'node:net'
 import { connect as tlsConnect } from 'node:tls'
 import { resolveDualStack } from '../src/net/tls-connect'
 
-// Opt-in, live: ATRIUM_LIVE_TLS=1 enables two tests that open real sockets to
-// imap.gmail.com:993 (a plain TCP sample, one handshake through
-// resolveDualStack, one bare handshake). CI never sets the variable, and
+// Opt-in, live: ATRIUM_LIVE_TLS=1 enables a module-level plain TCP sample and
+// two tests, all opening real sockets to imap.gmail.com:993: T1
+// (resolveDualStack's serial probes, then one handshake) and T2 (one bare
+// handshake). CI never sets the variable, and
 // `bun test` without it reports both as skipped — test/verify-gate.test.ts
 // pins that those two are the suite's only skips. Run them by hand:
 //
@@ -24,13 +25,16 @@ const LIVE = process.env.ATRIUM_LIVE_TLS === '1'
 const HOST = 'imap.gmail.com'
 const PORT = 993
 
-// The state of a plain TCP connect to `address` at 400 ms, and its final
-// outcome within 2000 ms. 400 gives a margin over the 250 ms default: a
-// refusal landing at 260-390 ms is 'error:…' here, and the bug pin then skips
-// rather than run against a fallback that would have worked by error anyway.
+// The state of a plain TCP connect to `address` at SAMPLE_MS, and its final
+// outcome within 2000 ms. SAMPLE_MS sits above the runtime's 250 ms default
+// because the sample and T2 are separate connects: a refusal that lands near
+// the timer could fall on either side of 250 ms in T2's own run, and a refusal
+// before the timer is error-driven fallback (which works), not the bug. Skipping
+// in that band avoids a red T2 that reads as a fixed bun when it was not.
+const SAMPLE_MS = 400
 type ConnectState = 'pending' | 'connected' | `error:${string}`
 
-async function sampleConnect(address: string, port: number): Promise<{ at400: ConnectState; final: ConnectState; ms: number }> {
+async function sampleConnect(address: string, port: number): Promise<{ atSample: ConnectState; final: ConnectState; ms: number }> {
   const t0 = performance.now()
   const sock = netConnect({ host: address, port })
   let state: ConnectState = 'pending'
@@ -40,10 +44,10 @@ async function sampleConnect(address: string, port: number): Promise<{ at400: Co
       sock.once('error', (e: NodeJS.ErrnoException) => { state = `error:${e.code ?? 'unknown'}`; resolve() })
     })
     const deadline = Bun.sleep(2000)
-    await Bun.sleep(400)
-    const at400: ConnectState = state
+    await Bun.sleep(SAMPLE_MS)
+    const atSample: ConnectState = state
     await Promise.race([settled, deadline])
-    return { at400, final: state, ms: Math.round(performance.now() - t0) }
+    return { atSample, final: state, ms: Math.round(performance.now() - t0) }
   } finally {
     sock.destroy()
   }
@@ -59,8 +63,11 @@ if (LIVE) {
     trapLine = 'tls-live: lookup returned no AAAA; the bug pin cannot run'
   } else {
     const s = await sampleConnect(v6.address, PORT)
-    trap = s.at400 === 'pending'
-    trapLine = `tls-live: first AAAA ${v6.address}: at 400 ms ${s.at400}; final ${s.final} at ${s.ms} ms; trap=${trap}`
+    // Still pending at the sample, and not a first address that failed before
+    // the runtime's default 250 ms attempt timer (that shape falls back by
+    // error and works) — so a cut SAMPLE_MS margin still refuses it.
+    trap = s.atSample === 'pending' && !(s.final.startsWith('error:') && s.ms < 250)
+    trapLine = `tls-live: first AAAA ${v6.address}: at ${SAMPLE_MS} ms ${s.atSample}; final ${s.final} at ${s.ms} ms; trap=${trap}`
   }
   console.warn(trapLine)
 }
@@ -102,6 +109,7 @@ test.skipIf(!LIVE)('resolveDualStack then tls.connect to imap.gmail.com:993 yiel
 }, 10_000)
 
 test.skipIf(!LIVE || !trap)('bug pin: on this bun a bare tls.connect whose first address is still pending at the 250 ms attempt timer fails with ERR_TLS_CERT_ALTNAME_INVALID and a null peer certificate — retire resolveDualStack when this goes red on a newer bun', async () => {
+  const t0 = performance.now()
   const sock = tlsConnect({ host: HOST, servername: HOST, port: PORT })
   try {
     // First of error / secureConnect, capped under the test's own 10 s so the
@@ -113,16 +121,21 @@ test.skipIf(!LIVE || !trap)('bug pin: on this bun a bare tls.connect whose first
       }),
       Bun.sleep(9_000).then(() => ({ kind: 'timeout' as const })),
     ])
+    const ms = Math.round(performance.now() - t0)
     // Which reading applies when this goes red: the sampled trap facts say
     // whether the first address really was pending at the timer (the bug's
-    // precondition), so a pass by error-driven fallback is not mistaken for
-    // the bug being fixed.
+    // precondition), and the elapsed ms says which fallback a success took —
+    // ~timer+handshake (a few hundred ms) means the timer-driven path now works
+    // on this bun; ~refusal+handshake (~1 s here) means the first address
+    // failed before the timer and the fallback was error-driven.
     const why =
-      `${trapLine}. A bare tls.connect got ${first.kind}` +
+      `${trapLine}. If the trap held and the handshake succeeded in ~timer+handshake (a few hundred ms), ` +
+      'this bun tries the next address after the timer: raise engines.bun, move the CI pin and the ' +
+      'verify-gate literals, delete resolveDualStack. A success at ~refusal+handshake (~1 s here) means the ' +
+      'first address failed before the timer and the fallback was error-driven, not a fix. ' +
+      `A bare tls.connect got ${first.kind}` +
       (first.kind === 'error' ? ` (${first.err.code})` : '') +
-      ` over ${sock.remoteFamily ?? '-'} ${sock.remoteAddress ?? '-'}. ` +
-      'If the trap held and the handshake succeeded, this bun tries the next address after the timer: ' +
-      'raise engines.bun, move the CI pin and the verify-gate literals, delete resolveDualStack.'
+      ` over ${sock.remoteFamily ?? '-'} ${sock.remoteAddress ?? '-'} after ${ms} ms`
     expect(first.kind, why).toBe('error')
     expect(first.kind === 'error' ? first.err.code : undefined, why).toBe('ERR_TLS_CERT_ALTNAME_INVALID')
     expect(sock.getPeerCertificate(), why).toBeNull()
