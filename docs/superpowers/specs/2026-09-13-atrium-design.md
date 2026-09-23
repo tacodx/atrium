@@ -322,6 +322,14 @@ than the network.** The provider resolves the host itself via `dns.lookup({all:t
 picks a reachable address, and passes `host: <ip>` + `servername: <hostname>`. An
 integration test asserts a non-empty peer certificate and must fail if the workaround
 is removed.
+[Correction, 2026-09-23: narrower than written. Measured on bun 1.3.11 (ADR 0001,
+"TLS — not measured at adoption; measured 2026-09-23"): the failure needs the first
+resolved address to be *still pending* when the 250 ms attempt timer fires — a first
+address that fails fast falls back by error and the bare connect works — and the
+certificate at the error is null, not empty. Mullvad with IPv6 off refuses at ~1 s,
+which is the slow-failing shape, so the workaround is mandatory there. The integration
+test exists (`test/tls-live.test.ts`, opt-in) and fails without the workaround only
+where that trap exists.]
 
 **v1 scope: the unread list only.** Sender, subject, age, and **two** actions —
 mark read and archive. "Open in web client" is deliberately cut from v1: it is the
@@ -634,6 +642,9 @@ the same port works inside the compiled binary; and a TLS handshake to
 `imap.gmail.com` yields a non-empty peer certificate. This settles the single most
 contested variable in the design and kills two silent-failure modes — both of which
 return HTTP 200 with a broken page — at the cheapest possible moment.
+[Answered 2026-09-23: the handshake yields a non-empty, authorized certificate on bun
+1.3.11 through `resolveDualStack`, over IPv4 — ADR 0001, "TLS — not measured at
+adoption; measured 2026-09-23".]
 
 Then, in order and for these reasons:
 

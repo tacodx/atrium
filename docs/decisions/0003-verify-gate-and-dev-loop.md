@@ -158,6 +158,11 @@ runner", which was too strong):
 - **No global git config** — `makeRepo()` supplies its committer identity inline.
 - **No user D-Bus** — `test/actions.test.ts` uses a fake launcher standing in for `systemd-run`.
 
+**Addendum (2026-09-23).** CI never sets `ATRIUM_LIVE_TLS`. `test/tls-live.test.ts`'s two tests (Plan 3 unit 0a,
+`720b9ff`) are opt-in on that variable and are skipped in CI by design, so the verify job opens no socket beyond
+loopback. The expected skip count is 2, pinned by "the suite skips exactly the two opt-in live TLS tests, and that
+file exists" (`1c2cac6`); any other skip count is a defect. The reference numbers below are per-commit and unchanged.
+
 ## (c) The dev loop
 
 ```
