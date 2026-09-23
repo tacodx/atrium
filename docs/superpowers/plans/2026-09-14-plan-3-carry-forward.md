@@ -235,8 +235,13 @@ returns the full repo list, not a fragment".
   `scoping:227` cites `0001:33-52` (Correction 1 through "guards.", now `:46-71`, with a bracket at `:63-68` inside
   it); `cf2:108-111` cites no line but says ADR 0001 "carries three dated corrections" and the TLS behaviour "was
   never measured" — there are four correction rounds now, and the measurement is taken. The same commit moved spec
-  lines after `:318` by 8 and after `:644` by 11, so ADR 0002 Ruling D's note (`0002:237`) citing
-  `spec:488-491` now points at `:496-499` (that note itself says to re-resolve by content).
+  lines after `:324` by 8 (the §7.3 bracket sits at `:325-332`) and after `:644` by 11, so ADR 0002 Ruling D's note (`0002:237`) citing
+  `spec:488-491` now points at `:496-499` (that note itself says to re-resolve by content). Three more Plan-2 sentences are overtaken by the measurement rather than by a moved line:
+  plan `:363` ("ADR 0001's 'Not measured' section stands as written"), plan `:5319-5322` ("Replace ADR 0001's 'Not
+  measured' section with the outcome. Today `src/net/tls-connect.ts` is imported only by its own test"), plan `:5349`
+  ("mail needs §8.5 and the unmeasured TLS"), and scoping `:227`'s "empty peer certificate" / "'Not measured'" wording
+  (ADR 0001, "TLS — not measured at adoption; measured 2026-09-23"). The plan and scoping documents are historical and
+  are not edited.
 - The plan cites `scripts/assert-package.ts:108-113` (`:3086`, `:4937`, `:5040`, `:5274`) for the Tailwind
   canary, which is now at `:166-178`; separately, its `:84-92` (`:5379`) is the "gate that went vacuous" note, not
   the canary, and that note is now at `:149-157` (ADR 0003's table, `0003:34`, maps it the same way).

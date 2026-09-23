@@ -203,11 +203,11 @@ fails with ERR_TLS_CERT_ALTNAME_INVALID and a null peer certificate — retire
 resolveDualStack when this goes red on a newer bun". Without the variable both
 skip, and "the suite skips exactly the two opt-in live TLS tests, and that file
 exists" pins that they are the suite's only skips: `bun run verify` is 338 pass
-/ 2 skip / 0 fail across 340 tests in 24 files; with the variable, 340 pass / 0
-skip. Committed by Plan 3 unit 0a: `720b9ff` (the script, the live test,
-`resolveDualStack`'s corrected doc comment), `1c2cac6` (the skip pin),
-`fdf7cff` (fix round: the sample margin named, the timing in the bug pin's
-message).
+/ 2 skip / 0 fail, 340 tests, 24 files; `ATRIUM_LIVE_TLS=1 bun run verify` at
+942ee3d (`live-verify.log`): 340 pass / 0 fail. Committed by Plan 3 unit 0a:
+`720b9ff` (the script, the live test, `resolveDualStack`'s corrected doc
+comment), `1c2cac6` (the skip pin), `fdf7cff` (fix round: the sample margin
+named, the timing in the bug pin's message).
 
 *Upstream.* oven-sh/bun#31950 (closed unmerged 2026-09-05, superseded by
 #41447) is adjacent — it relabels fetch-client handshake resets that were
